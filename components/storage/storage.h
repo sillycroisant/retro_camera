@@ -9,15 +9,58 @@
 extern "C" {
 #endif
 
-esp_err_t sdcard_init(void);
+typedef struct 
+{   
+    // for later, error check
+    uint32_t magic;
+    uint16_t version;
+    uint16_t reserved;
 
-esp_err_t sdcard_deinit(void);
+    // currently using
+    uint32_t next_index;
+    uint32_t image_count;
+} storage_index_t;
 
-esp_err_t sdcard_save_file(
-    const char *filename,
+/**
+ * @brief Mount SD card and prepare photos folder
+ */
+esp_err_t storage_init(void);
+
+
+/**
+ * @brief Unmount SD card
+ */
+esp_err_t storage_deinit(void);
+
+
+/** 
+* @brief Save jpeg image into SD card
+* @param data jpeg image pointe
+* @param len  size of jpeg image
+* @return ESP_OKE if success
+*/
+ esp_err_t storage_save_jpeg(
     const uint8_t *data,
     size_t len);
-    
+
+
+/**
+ * @brief Directory path of the latest image
+ */
+const char *storage_latest_path(void);
+
+
+/**
+ * @brief Filename of latest image
+ */
+const char *storage_latest_filename(void);
+
+
+/**
+ * @brief Number of saved images in storage
+ */
+uint32_t storage_image_count(void);
+
 #ifdef __cplustplus
 }
 #endif

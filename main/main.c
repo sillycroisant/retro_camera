@@ -125,7 +125,7 @@ void app_main(void)
         init_autofocus();
     #endif
     
-    ESP_ERROR_CHECK(sdcard_init());
+    ESP_ERROR_CHECK(storage_init());
 
     while(1){
         ESP_LOGI(TAG, "Taking picture...");
@@ -138,13 +138,16 @@ void app_main(void)
             return;
         }
 
-        // send image size (4 bytes)
-        uint32_t size = pic->len;
-
         // use pic->buf to accessthe image
         ESP_LOGI(TAG, "Picture taken! Its size was: %u bytes",pic->len);
+
+        storage_save_jpeg(
+            pic->buf,
+            pic->len
+        );
+
         esp_camera_fb_return(pic);
 
-        vTaskDelay(5000/ portTICK_PERIOD_MS);
+        vTaskDelay(100000/ portTICK_PERIOD_MS);
     }
 }
