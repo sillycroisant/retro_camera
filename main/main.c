@@ -12,6 +12,9 @@
 
 #include "esp_camera.h"
 
+#include "esp_netif.h"
+#include "esp_event.h"
+
 // for sd card
 // #include "driver/sdmmc_host.h"
 // #include "esp_vfs_fat.h"
@@ -19,7 +22,8 @@
 #include "camera.h"
 
 #include "storage.h"
-
+#include "webserver.h"
+#include "network.h"
 
 // for http web server
 
@@ -125,8 +129,16 @@ void app_main(void)
         init_autofocus();
     #endif
     
-    ESP_ERROR_CHECK(storage_init());
+    storage_init();
+    // init network
+    network_config_t nw_cfg = {
+        .ssid = "retro camera",
+        .password = "123456789"
+    };
 
+    ESP_ERROR_CHECK(network_init(&nw_cfg));
+
+    
     while(1){
         ESP_LOGI(TAG, "Taking picture...");
         

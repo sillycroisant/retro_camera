@@ -1,5 +1,8 @@
 idf_component_register(
     SRCS "webserver.c"
+
     INCLUDE_DIRS "."
-    REQUIRES driver
+
+    REQUIRES 
+            "esp_http_server"
 )
