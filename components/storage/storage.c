@@ -17,6 +17,8 @@
 #define INDEX_FILE      "/sdcard/index.dat"
 #define STORAGE_INDEX_MAGIC NULL
 #define STORAGE_INDEX_VERSION 1
+#define STORAGE_MOUNT_POINT "/sdcard"
+#define STORAGE_WWW_DIR "/www"
 
 static const char *TAG = "[Storage]";
 
@@ -253,3 +255,68 @@ esp_err_t sdcard_save_file(
     return ESP_OK;
 }
 
+static esp_err_t uri_to_path(
+    const char *uri,
+    char *path,
+    size_t path_size
+)
+{
+    if (uri == NULL || path == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if(strcmp(uri, "/") == 0){
+        snprintf(path, path_size, 
+            STORAGE_MOUNT_POINT STORAGE_WWW_DIR "/index.html");
+            return ESP_OK;
+    }
+
+    if(strncmp(uri, "/photos/", 8) == 0)
+    {
+        snprintf(path, path_size,
+            STORAGE_MOUNT_POINT "%s", uri);
+            return ESP_OK;
+    }
+
+    snprintf(path, path_size, 
+        STORAGE_MOUNT_POINT STORAGE_WWW_DIR "%s", uri);
+
+    return ESP_OK;
+}
+
+esp_err_t storage_open_uri(
+    const char *uri, FILE **fp
+) {
+    if(uri == NULL || fp == NULL)
+    {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char path[128];
+
+    esp_err_t err = uri_to_path(uri, path, sizeof(path));
+
+    if(err != ESP_OK)
+    {
+        return err;
+    }
+
+    ESP_LOGI(TAG, "Open URI: %s", uri);
+    ESP_LOGI(TAG, "Mapped path: %s", path);
+
+    *fp = fopen(path, "rb");
+
+    if(*fp == NULL){
+        ESP_LOGE(TAG, "Cannot open file");
+        return ESP_ERR_NOT_FOUND;
+    }
+    return ESP_OK;
+}
+
+void storage_close(FILE *fp)
+{
+    if (fp != NULL){
+        fclose(fp);
+    }
+}

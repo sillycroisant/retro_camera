@@ -2,6 +2,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 
 #include "esp_err.h"
 
@@ -60,6 +61,16 @@ const char *storage_latest_filename(void);
  * @brief Number of saved images in storage
  */
 uint32_t storage_image_count(void);
+
+
+/**
+ * @brief Open image base on URI
+ */
+
+esp_err_t storage_open_uri(const char *uri, FILE **fp);
+
+// Close storage
+void storage_close(FILE *fp);
 
 #ifdef __cplustplus
 }

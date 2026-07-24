@@ -1,5 +1,5 @@
 #include "webserver.h"
-#include "handlers.h"
+#include "handlers/handlers.h"
 
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -24,6 +24,9 @@ esp_err_t webserver_start(void)
     }
 
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+    config.uri_match_fn = httpd_uri_match_wildcard;
+    
     ESP_LOGI(TAG, "Starting HTTP server...");
 
     ESP_ERROR_CHECK(httpd_start(&g_server.handle, &config));

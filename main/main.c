@@ -130,6 +130,19 @@ void app_main(void)
     #endif
     
     storage_init();
+
+    // testing storage open image path
+    FILE *fp = NULL;
+
+    esp_err_t err = storage_open_uri("/photos/photo_000001.jpg", &fp);
+
+    if(err == ESP_OK){
+        ESP_LOGI("MAIN", "File opened successfully.");
+        storage_close(fp);
+    } else {
+        ESP_LOGE("MAIN", "Cannot open file");
+    }
+
     // init network
     network_config_t nw_cfg = {
         .ssid = "retro camera",
