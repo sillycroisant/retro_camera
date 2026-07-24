@@ -138,6 +138,7 @@ void app_main(void)
 
     ESP_ERROR_CHECK(network_init(&nw_cfg));
 
+    webserver_start();
     
     while(1){
         ESP_LOGI(TAG, "Taking picture...");

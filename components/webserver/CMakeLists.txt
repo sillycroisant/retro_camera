@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "webserver.c"
+    SRCS "handlers.c" "webserver.c"
 
     INCLUDE_DIRS "."
 
