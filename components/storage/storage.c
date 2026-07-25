@@ -5,6 +5,8 @@
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <errno.h>
 
 #include "esp_log.h"
 #include "esp_vfs_fat.h"
@@ -266,21 +268,15 @@ static esp_err_t uri_to_path(
         return ESP_ERR_INVALID_ARG;
     }
 
-    if(strcmp(uri, "/") == 0){
+    if(strncmp(uri, "/photos/", 8) == 0) {
+        snprintf(path, path_size, "/sdcard%s", uri);
+    }
+    else if(strncmp(uri, "/static/", 8) == 0) {
         snprintf(path, path_size, 
-            STORAGE_MOUNT_POINT STORAGE_WWW_DIR "/index.html");
-            return ESP_OK;
+                "/sdcard/www/%s", uri + strlen("/static/"));
+    } else {
+        return ESP_ERR_NOT_FOUND;
     }
-
-    if(strncmp(uri, "/photos/", 8) == 0)
-    {
-        snprintf(path, path_size,
-            STORAGE_MOUNT_POINT "%s", uri);
-            return ESP_OK;
-    }
-
-    snprintf(path, path_size, 
-        STORAGE_MOUNT_POINT STORAGE_WWW_DIR "%s", uri);
 
     return ESP_OK;
 }

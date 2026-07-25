@@ -4,6 +4,7 @@
 #include "api_status.h"
 #include "api_capture.h"
 #include "api_gallery.h"
+#include "static_files.h"
 
 #include "esp_log.h"
 
@@ -24,6 +25,8 @@ esp_err_t handlers_register(httpd_handle_t server)
     ESP_ERROR_CHECK(api_capture_register(server));
     
     ESP_ERROR_CHECK(api_gallery_register(server));
+
+    ESP_ERROR_CHECK(static_files_register(server));
 
     ESP_LOGI(TAG, "ALL Handlers registered.");
 

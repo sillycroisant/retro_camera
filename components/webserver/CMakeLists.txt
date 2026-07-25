@@ -5,8 +5,7 @@ idf_component_register(
         "handlers/api_status.c"
         "handlers/api_capture.c"
         "handlers/api_gallery.c"
-        # "handlers/static_files.c"
-
+        "handlers/static_files.c"
 
         "webserver.c"
 
@@ -14,4 +13,5 @@ idf_component_register(
 
     REQUIRES 
         "esp_http_server"
+        "storage"
 )
