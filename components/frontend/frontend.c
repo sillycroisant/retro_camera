@@ -49,7 +49,7 @@ static const frontend_asset_t assets[] = {
         "style.css", style_css_start, style_css_end
     },
     {
-        "app.js", app_js_start, style_css_end
+        "app.js", app_js_start, app_js_end
     }
 };
 
@@ -70,12 +70,12 @@ static bool file_exists(const char *path){
 }
 
 // neu file ko ton tai thi se ghi vao the sd
-static esp_err_t write_file(
+static esp_err_t update_asset(
     const char *path,
     const uint8_t *begin,
     const uint8_t *end
 ) {
-
+    
     ESP_LOGI(TAG, "Writing to: %s", path);
     
     FILE *fp = fopen(path, "wb");
@@ -89,6 +89,11 @@ static esp_err_t write_file(
     }
 
     size_t size = end - begin;
+
+    ESP_LOGI(TAG, "begin = %p", begin);
+    ESP_LOGI(TAG, "end   = %p", end);
+    ESP_LOGI(TAG, "size  = %u", (unsigned)size);
+
     size_t written = fwrite(begin, 1, size, fp);
     fclose(fp);
 
@@ -99,6 +104,73 @@ static esp_err_t write_file(
 
     ESP_LOGI(TAG, "Created %s (%u bytes)", path, (unsigned)size);
     return ESP_OK;
+}
+
+static bool file_equals(
+    const char *path,
+    const uint8_t *begin, const uint8_t *end
+) {
+    FILE *fp = fopen(path, "rb");
+
+    if(fp == NULL){
+        return false;
+    }
+
+    size_t asset_size = end - begin;
+
+
+    fseek(fp, 0, SEEK_END);
+    size_t file_size = ftell(fp);
+    rewind(fp);
+    
+    // debug here
+    char text[512];
+    size_t n = fread(text,1,sizeof(text)-1,fp);
+    text[n]=0;
+    ESP_LOGI(TAG,"===== SD File =====");
+    printf("%s\n",text);
+    rewind(fp);
+
+    ESP_LOGI(TAG, "===== Embedded ====="); 
+    printf("%.*s\n", (int)asset_size, (const char *)begin);
+
+    
+    ESP_LOGI(TAG, "Compare %s: asset=%u file=%u",
+         path, (unsigned)asset_size,(unsigned)file_size);
+    // debug end here
+
+    rewind(fp);
+
+    if(file_size != asset_size){
+        fclose(fp);
+        return false;
+    }
+
+    uint8_t buffer[512];
+    size_t offset = 0;
+
+    while (offset < asset_size){
+        size_t remain = asset_size - offset;
+
+        size_t chunk = remain > sizeof(buffer) ? sizeof(buffer) : remain;
+
+        if(fread(buffer, 1, chunk, fp) != chunk)
+        {
+            fclose(fp);
+            return false;
+        }
+
+        if(memcmp(buffer, begin+offset, chunk) != 0){
+            ESP_LOGI(TAG, "File differs at offset %u", (unsigned)offset);
+            fclose(fp);
+            return false;
+        }
+
+        offset += chunk;
+    }
+
+    fclose(fp);
+    return true;
 }
 
 // sync file tren project vs the nho board
@@ -120,13 +192,23 @@ esp_err_t frontend_sync_to_sd(void){
 
         snprintf(path, sizeof(path), "/sdcard/www/%s", assets[i].filename);
         
-        if(file_exists(path)){
-            ESP_LOGI(TAG, "%s exists", assets[i].filename);
+        if(!file_exists(path))
+        {
+            ESP_LOGI(TAG, "%s not found -> create", assets[i].filename);
+
+            ESP_ERROR_CHECK(update_asset(path, assets[i].begin, assets[i].end));
             continue;
         }
 
-        ESP_LOGI(TAG, "Copying %s", assets[i].filename);
-        ESP_ERROR_CHECK(write_file(path, assets[i].begin, assets[i].end));
+        if(file_equals(path, assets[i].begin, assets[i].end)) 
+        {
+            ESP_LOGI(TAG, "%s already up-to-date", assets[i].filename);
+            continue;
+        } else {
+            ESP_LOGI(TAG, "%s changed -> update", assets[i].filename);
+            ESP_ERROR_CHECK(update_asset(path, assets[i].begin, assets[i].end));
+        }
+
     }
 
     return ESP_OK;

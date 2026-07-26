@@ -42,26 +42,26 @@ static esp_err_t static_get_handler(httpd_req_t *req)
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG, "Content-Type = %s", get_content_type(req->uri));
+    // ESP_LOGI(TAG, "Content-Type = %s", get_content_type(req->uri));
     
     httpd_resp_set_type(req, get_content_type(req->uri));
     uint8_t buffer[4096];
-    ESP_LOGI(TAG, "Type set OK");
+    // ESP_LOGI(TAG, "Type set OK");
 
     while(1) {
         size_t bytes = fread(buffer, 1, sizeof(buffer), fp);
 
-        ESP_LOGI(TAG, "Read %u bytes", (unsigned)bytes);
+        // ESP_LOGI(TAG, "Read %u bytes", (unsigned)bytes);
 
         if (bytes == 0) {
             break;
         }
 
-        ESP_LOGI(TAG, "Sending chunk...");
+        // ESP_LOGI(TAG, "Sending chunk...");
 
         err = httpd_resp_send_chunk(req, (const char *)buffer, bytes);
 
-        ESP_LOGI(TAG, "Chunk sent");
+        // ESP_LOGI(TAG, "Chunk sent");
 
         if (err != ESP_OK) {
             storage_close(fp);
@@ -69,10 +69,10 @@ static esp_err_t static_get_handler(httpd_req_t *req)
         }
     }
 
-    ESP_LOGI(TAG, "Closing file");
+    // ESP_LOGI(TAG, "Closing file");
     storage_close(fp);
 
-    ESP_LOGI(TAG, "Sending final chunk");
+    // ESP_LOGI(TAG, "Sending final chunk");
     httpd_resp_send_chunk(req, NULL, 0);
 
     ESP_LOGI(TAG, "Request finished");

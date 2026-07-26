@@ -295,20 +295,20 @@ esp_err_t storage_open_uri(
         return err;
     }
 
-    ESP_LOGI(TAG, "Open URI: %s", uri);
+    // ESP_LOGI(TAG, "Open URI: %s", uri);
     ESP_LOGI(TAG, "Mapped path: %s", path);
 
     *fp = fopen(path, "rb");
     
-    // debuf html
-    char test[256] = {0};
+    // // debuf html
+    // char test[256] = {0};
 
-    FILE *dbg = fopen("/sdcard/www/index.html", "rb");
-    fread(test, 1, sizeof(test)-1, dbg);
-    fclose(dbg);
+    // FILE *dbg = fopen("/sdcard/www/index.html", "rb");
+    // fread(test, 1, sizeof(test)-1, dbg);
+    // fclose(dbg);
 
-    ESP_LOGI(TAG, "index.html:\n%s", test);
-    // end debugging
+    // ESP_LOGI(TAG, "index.html:\n%s", test);
+    // // end debugging
     
     if(*fp == NULL){
         ESP_LOGE(TAG, "Cannot open file");
