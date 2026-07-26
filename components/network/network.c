@@ -39,6 +39,8 @@ static esp_err_t network_init_wifi_driver(void)
 
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+    ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
+    
     return ESP_OK;
 }
 
@@ -58,7 +60,15 @@ static esp_err_t network_configure_ap(
 
     if(strlen(cfg->password) == 0)
     {
+        wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+    } else {
         wifi_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+
+        strncpy(
+            (char *)wifi_config.ap.password,
+            cfg->password,
+            sizeof(wifi_config.ap.password)
+        );
     }
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));

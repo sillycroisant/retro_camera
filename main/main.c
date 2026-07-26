@@ -119,7 +119,38 @@ static void init_autofocus(void)
 
 void app_main(void)
 {
-    // initialization
+   
+    // Mount SD card
+    storage_init();
+    
+    // Init Frontend
+    frontend_init();
+
+    frontend_sync_to_sd();
+
+    // // testing storage open image path
+    FILE *fp = NULL;
+
+    esp_err_t err = storage_open_uri("/photos/photo_000001.jpg", &fp);
+
+    if(err == ESP_OK){
+        ESP_LOGI("MAIN", "File opened successfully.");
+        storage_close(fp);
+    } else {
+        ESP_LOGE("MAIN", "Cannot open file");
+    }
+
+    // Init wifi connection
+    network_config_t nw_cfg = {
+        .ssid = "retro camera",
+        .password = "123456789"
+    };
+
+    ESP_ERROR_CHECK(network_init(&nw_cfg));
+
+    ESP_ERROR_CHECK(webserver_start());
+
+    // init camera
     #if ESP_CAMERA_SUPPORTED
         if (ESP_OK != init_camera()){
             return;
@@ -130,52 +161,23 @@ void app_main(void)
         init_autofocus();
     #endif
     
-    // Mount SD card
-    storage_init();
+    // Init Webserver 
     
-    // Init Frontend
-    frontend_init();
-
-    frontend_sync_to_sd();
-    // OK from here
-    // // testing storage open image path
-    // FILE *fp = NULL;
-
-    // esp_err_t err = storage_open_uri("/photos/photo_000001.jpg", &fp);
-
-    // if(err == ESP_OK){
-    //     ESP_LOGI("MAIN", "File opened successfully.");
-    //     storage_close(fp);
-    // } else {
-    //     ESP_LOGE("MAIN", "Cannot open file");
-    // }
-
-    // // Init wifi connection
-    // network_config_t nw_cfg = {
-    //     .ssid = "retro camera",
-    //     .password = "123456789"
-    // };
-
-    // ESP_ERROR_CHECK(network_init(&nw_cfg));
-
-    // // Init Webserver 
-    // ESP_ERROR_CHECK(webserver_start());
-    
-    // while(1){
-    //     ESP_LOGI(TAG, "Taking picture...");
+    while(1){
+        ESP_LOGI(TAG, "Taking picture...");
         
-    //     // camera frame buffer receive image from camera
-    //     camera_fb_t *pic = esp_camera_fb_get();
+        // camera frame buffer receive image from camera
+        camera_fb_t *pic = esp_camera_fb_get();
         
-    //     if (!pic){
-    //         ESP_LOGE(TAG, "Camera capture failed");
-    //         return;
-    //     }
+        if (!pic){
+            ESP_LOGE(TAG, "Camera capture failed");
+            return;
+        }
 
-    //     // use pic->buf to accessthe image
-    //     ESP_LOGI(TAG, "Picture taken! Its size was: %u bytes",pic->len);
-    //     storage_save_jpeg(pic->buf, pic->len);
-    //     esp_camera_fb_return(pic);
-    //     vTaskDelay(100000/ portTICK_PERIOD_MS);
-    // }
+        // use pic->buf to accessthe image
+        ESP_LOGI(TAG, "Picture taken! Its size was: %u bytes",pic->len);
+        storage_save_jpeg(pic->buf, pic->len);
+        esp_camera_fb_return(pic);
+        vTaskDelay(100000/ portTICK_PERIOD_MS);
+    }
 }

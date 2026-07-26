@@ -9,13 +9,49 @@
 
 #include "errno.h"
 
+#define FRONTEND_ASSET_COUNT (sizeof(assets)/sizeof(assets[0]))
+
 static const char *TAG = "Frontend";
 
+// index for html
 extern const uint8_t index_html_start[]
 asm("_binary_index_html_start");
 
 extern const uint8_t index_html_end[]
 asm("_binary_index_html_end");
+
+// index for css
+extern const uint8_t style_css_start[]
+asm("_binary_style_css_start");
+
+extern const uint8_t style_css_end[]
+asm("_binary_style_css_end");
+
+// index for javascript
+extern const uint8_t app_js_start[]
+asm("_binary_app_js_start");
+
+extern const uint8_t app_js_end[]
+asm("_binary_app_js_end");
+
+typedef struct
+{
+    const char *filename;
+    const uint8_t *begin;
+    const uint8_t *end;
+} frontend_asset_t;
+
+static const frontend_asset_t assets[] = {
+    {
+        "index.html", index_html_start, index_html_end
+    },
+    {
+        "style.css", style_css_start, style_css_end
+    },
+    {
+        "app.js", app_js_start, style_css_end
+    }
+};
 
 esp_err_t frontend_init(void)
 {
@@ -39,10 +75,16 @@ static esp_err_t write_file(
     const uint8_t *begin,
     const uint8_t *end
 ) {
+
+    ESP_LOGI(TAG, "Writing to: %s", path);
+    
     FILE *fp = fopen(path, "wb");
 
     if(fp == NULL){
-        ESP_LOGE(TAG, "Cannot create %s", path);
+        ESP_LOGE(
+            TAG, "Cannot create %s errno=%d (%s)", 
+            path, errno, strerror(errno));
+
         return ESP_FAIL;
     }
 
@@ -72,18 +114,20 @@ esp_err_t frontend_sync_to_sd(void){
         ESP_LOGI(TAG, "Created /www");
     }
 
-    const char *index_path = "/sdcard/www/index.html";
+    for (size_t i = 0; i < FRONTEND_ASSET_COUNT; i++)
+    {
+        char path[128];
 
-    if(file_exists(index_path)){
-        ESP_LOGI(TAG, "index.html already exists");
-        return ESP_OK;
+        snprintf(path, sizeof(path), "/sdcard/www/%s", assets[i].filename);
+        
+        if(file_exists(path)){
+            ESP_LOGI(TAG, "%s exists", assets[i].filename);
+            continue;
+        }
+
+        ESP_LOGI(TAG, "Copying %s", assets[i].filename);
+        ESP_ERROR_CHECK(write_file(path, assets[i].begin, assets[i].end));
     }
 
-    ESP_LOGI(TAG,
-            "Copy embedded index.html");
-
-    return write_file(
-                index_path,
-                index_html_start,
-                index_html_end);
+    return ESP_OK;
 }

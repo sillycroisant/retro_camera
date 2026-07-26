@@ -26,6 +26,7 @@ esp_err_t handlers_register(httpd_handle_t server)
     
     ESP_ERROR_CHECK(api_gallery_register(server));
 
+    // static register in the last
     ESP_ERROR_CHECK(static_files_register(server));
 
     ESP_LOGI(TAG, "ALL Handlers registered.");

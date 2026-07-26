@@ -29,6 +29,10 @@ static esp_err_t static_get_handler(httpd_req_t *req)
 {
     ESP_LOGI(TAG, "GET %s", req->uri);
 
+    if(strncmp(req->uri, "/api/", 5) == 0){
+        return ESP_FAIL;
+    }
+
     FILE *fp = NULL;
 
     esp_err_t err  = storage_open_uri(req->uri, &fp);
@@ -37,17 +41,27 @@ static esp_err_t static_get_handler(httpd_req_t *req)
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
         return ESP_FAIL;
     }
-
+    
+    ESP_LOGI(TAG, "Content-Type = %s", get_content_type(req->uri));
+    
     httpd_resp_set_type(req, get_content_type(req->uri));
     uint8_t buffer[4096];
+    ESP_LOGI(TAG, "Type set OK");
 
     while(1) {
         size_t bytes = fread(buffer, 1, sizeof(buffer), fp);
+
+        ESP_LOGI(TAG, "Read %u bytes", (unsigned)bytes);
+
         if (bytes == 0) {
             break;
         }
 
+        ESP_LOGI(TAG, "Sending chunk...");
+
         err = httpd_resp_send_chunk(req, (const char *)buffer, bytes);
+
+        ESP_LOGI(TAG, "Chunk sent");
 
         if (err != ESP_OK) {
             storage_close(fp);
@@ -55,25 +69,19 @@ static esp_err_t static_get_handler(httpd_req_t *req)
         }
     }
 
+    ESP_LOGI(TAG, "Closing file");
     storage_close(fp);
 
+    ESP_LOGI(TAG, "Sending final chunk");
     httpd_resp_send_chunk(req, NULL, 0);
 
+    ESP_LOGI(TAG, "Request finished");
     return ESP_OK;
 }
 
-
-static const httpd_uri_t photo_uri = 
-{
-    .uri = "/photos/*",
-    .method = HTTP_GET,
-    .handler = static_get_handler,
-    .user_ctx = NULL
-};
-
 static const httpd_uri_t static_uri = 
 {
-    .uri = "/static/*",
+    .uri = "/*",
     .method = HTTP_GET,
     .handler = static_get_handler,
     .user_ctx = NULL
@@ -81,7 +89,6 @@ static const httpd_uri_t static_uri =
 
 esp_err_t static_files_register(httpd_handle_t server){
 
-    ESP_ERROR_CHECK(httpd_register_uri_handler(server, &photo_uri));
     ESP_ERROR_CHECK(httpd_register_uri_handler(server, &static_uri));
 
     ESP_LOGI(TAG, "Static file handlers registered");

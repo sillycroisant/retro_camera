@@ -270,14 +270,11 @@ static esp_err_t uri_to_path(
 
     if(strncmp(uri, "/photos/", 8) == 0) {
         snprintf(path, path_size, "/sdcard%s", uri);
-    }
-    else if(strncmp(uri, "/static/", 8) == 0) {
+    } else { // static for webserver frontend
         snprintf(path, path_size, 
-                "/sdcard/www/%s", uri + strlen("/static/"));
-    } else {
-        return ESP_ERR_NOT_FOUND;
+                "/sdcard/www%s", uri);
     }
-
+    
     return ESP_OK;
 }
 
@@ -302,7 +299,17 @@ esp_err_t storage_open_uri(
     ESP_LOGI(TAG, "Mapped path: %s", path);
 
     *fp = fopen(path, "rb");
+    
+    // debuf html
+    char test[256] = {0};
 
+    FILE *dbg = fopen("/sdcard/www/index.html", "rb");
+    fread(test, 1, sizeof(test)-1, dbg);
+    fclose(dbg);
+
+    ESP_LOGI(TAG, "index.html:\n%s", test);
+    // end debugging
+    
     if(*fp == NULL){
         ESP_LOGE(TAG, "Cannot open file");
         return ESP_ERR_NOT_FOUND;

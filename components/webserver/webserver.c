@@ -26,6 +26,7 @@ esp_err_t webserver_start(void)
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
     config.uri_match_fn = httpd_uri_match_wildcard;
+    config.stack_size = 8192;
     
     ESP_LOGI(TAG, "Starting HTTP server...");
 

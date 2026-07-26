@@ -8,6 +8,8 @@ idf_component_register(
 
     EMBED_TXTFILES
         "assets/index.html"
+        "assets/style.css"
+        "assets/app.js"
 
     REQUIRES
         storage
