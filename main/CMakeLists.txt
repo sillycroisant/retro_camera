@@ -6,8 +6,10 @@ idf_component_register(
     REQUIRES
         camera
         storage
-        wifi
         webserver
         network
         frontend
+        events
+        input
+        mode
 )

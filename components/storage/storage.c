@@ -13,6 +13,7 @@
 
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
+#include "esp_heap_caps.h"
 
 #define STORAGE_ROOT    "/sdcard"
 #define PHOTO_DIRECTORY "/sdcard/photos"
@@ -188,10 +189,17 @@ esp_err_t storage_save_jpeg(
         latest_filename
     );
 
+    ESP_LOGI(TAG, "Free heap: %u", (unsigned)esp_get_free_heap_size());
+
+    ESP_LOGI(TAG, "Largest block: %u",
+            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
     FILE *fp = fopen(latest_path, "wb");
 
     if (fp == NULL) {
         ESP_LOGE(TAG, "Cannot create image file");
+        ESP_LOGE(TAG,"errno=%d (%s)", errno, strerror(errno));
+
         return ESP_FAIL;
     }
 

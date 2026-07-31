@@ -123,21 +123,21 @@ static bool file_equals(
     size_t file_size = ftell(fp);
     rewind(fp);
     
-    // debug here
-    char text[512];
-    size_t n = fread(text,1,sizeof(text)-1,fp);
-    text[n]=0;
-    ESP_LOGI(TAG,"===== SD File =====");
-    printf("%s\n",text);
-    rewind(fp);
+    // // debug here
+    // char text[512];
+    // size_t n = fread(text,1,sizeof(text)-1,fp);
+    // text[n]=0;
+    // ESP_LOGI(TAG,"===== SD File =====");
+    // printf("%s\n",text);
+    // rewind(fp);
 
-    ESP_LOGI(TAG, "===== Embedded ====="); 
-    printf("%.*s\n", (int)asset_size, (const char *)begin);
+    // ESP_LOGI(TAG, "===== Embedded ====="); 
+    // printf("%.*s\n", (int)asset_size, (const char *)begin);
 
     
-    ESP_LOGI(TAG, "Compare %s: asset=%u file=%u",
-         path, (unsigned)asset_size,(unsigned)file_size);
-    // debug end here
+    // ESP_LOGI(TAG, "Compare %s: asset=%u file=%u",
+    //      path, (unsigned)asset_size,(unsigned)file_size);
+    // // debug end here
 
     rewind(fp);
 
