@@ -31,8 +31,30 @@
 
 static const char *TAG = "Main.c";
 
+static void test_task(void *arg)
+{
+    while(1)
+    {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+
+        event_t event = {
+            .channel = EVENT_CHANNEL_CAMERA,
+            .type.camera = CAMERA_EVENT_CAPTURE,
+        };
+
+        ESP_LOGI("TEST", "Publish capture");
+
+        esp_err_t ret = events_publish(&event);
+
+        if(ret != ESP_OK){
+            ESP_LOGE("TEST", "events_publish failed: %s", esp_err_to_name(ret));
+        }
+    }
+}
+
 void app_main(void)
 {
+
     events_init();
 
     mode_init();
@@ -41,15 +63,18 @@ void app_main(void)
 
     storage_init();
 
-    input_init();
+    // input_init();
 
     camera_start();
 
-    input_start();
+    // input_start();
     
     ESP_LOGI(TAG, "System ready");
     
-    while(1){
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    BaseType_t ret = xTaskCreate(test_task, "test", 4096, NULL, 3, NULL);
+
+    if(ret != pdPASS) ESP_LOGE(TAG, "Cannot create test task");
+    // while(1){
+    //     vTaskDelay(pdMS_TO_TICKS(1000));
+    // }
 }

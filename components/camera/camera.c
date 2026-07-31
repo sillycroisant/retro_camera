@@ -70,8 +70,8 @@ static camera_config_t s_camera_config =
     .ledc_channel = LEDC_CHANNEL_0,
 
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_VGA,
-    .jpeg_quality = 12,
+    .frame_size = FRAMESIZE_FHD,
+    .jpeg_quality = 8,
     .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY
