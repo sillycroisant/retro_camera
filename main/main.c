@@ -29,20 +29,7 @@
 #include "events.h"
 #include "mode.h"
 
-// get config base on esp32 board
-#define BOARD_ESP32CAM_AITHINKER 1
-
-// pin out for esp32-cam boards
-#include "camera_pinout.h"
-
-// include auto focus mode if camera is supported (for OV5460)s
-#if defined(CONFIG_CAMERA_AF_SUPPORT) && CONFIG_CAMERA_AF_SUPPORT
-#include "esp_camera_af.h"
-#endif
-
 static const char *TAG = "Main.c";
-
-
 
 void app_main(void)
 {
@@ -61,17 +48,8 @@ void app_main(void)
     input_start();
     
     ESP_LOGI(TAG, "System ready");
-
-    // Init wifi connection
-    // network_config_t nw_cfg = {
-    //     .ssid = "retro camera",
-    //     .password = "123456789"
-    // };
-
-    // network_init(&nw_cfg);
     
     while(1){
-        camera_capture_photo();
-        vTaskDelay(pdMS_TO_TICKS(30000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
     }
 }

@@ -144,14 +144,11 @@ event_subscriber_t *events_subscribe(
 
 esp_err_t events_publish(const event_t *event)
 {   
-    ESP_LOGI(TAG, "Publish mask=%08lx", (unsigned long)(1UL << event->channel));
-    if(!s_initialized){
-        return ESP_ERR_INVALID_STATE;
-    }
+    if(event == NULL) return ESP_ERR_INVALID_ARG;
 
-    if(event == NULL){
-        return ESP_ERR_INVALID_ARG;
-    }
+    ESP_LOGI(TAG, "Publish mask=%08lx", (unsigned long)(1UL << event->channel));
+    
+    if(!s_initialized) return ESP_ERR_INVALID_STATE;
 
     if(!events_channel_valid(event->channel))
     {
@@ -186,7 +183,7 @@ esp_err_t events_publish(const event_t *event)
     return ESP_OK;
 }
 
-esp_err_t events_receive(
+BaseType_t events_receive(
     event_subscriber_t *subscriber,
     event_t *event,
     TickType_t timeout

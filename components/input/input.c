@@ -22,10 +22,10 @@
 #define INPUT_TASK_PRIORITY     5
 #define INPUT_DEBOUNCE_MS       50
 
-#define GPIO_BUTTON_ID_1 GPIO_NUM_3
-#define GPIO_BUTTON_ID_2 GPIO_NUM_12
-#define GPIO_BUTTON_ID_3 GPIO_NUM_16
-#define GPIO_BUTTON_ID_4 GPIO_NUM_33
+#define GPIO_BUTTON_ID_1 GPIO_NUM_16
+#define GPIO_BUTTON_ID_2 GPIO_NUM_14
+#define GPIO_BUTTON_ID_3 GPIO_NUM_15
+#define GPIO_BUTTON_ID_4 GPIO_NUM_2
 
 typedef enum
 {
@@ -185,7 +185,7 @@ static void input_task(void *arg)
 
     ESP_LOGI(TAG, "Input task started");
     ESP_LOGI(TAG, "ISR count=%lu", (unsigned long)s_isr_count);
-    
+
     while(1)
     {
         if(xQueueReceive(s_button_queue, &button_event, portMAX_DELAY) != pdTRUE) continue;
@@ -209,8 +209,6 @@ esp_err_t input_init(void)
 
     if (s_button_queue == NULL) return ESP_ERR_NO_MEM;
 
-    // E (2700) gpio: gpio_install_isr_service(537): GPIO isr service already installed
-
     gpio_config_t io =
     {
         .mode = GPIO_MODE_INPUT,
@@ -225,11 +223,10 @@ esp_err_t input_init(void)
 
         ESP_ERROR_CHECK(gpio_config(&io));
 
-        ESP_ERROR_CHECK(
-            gpio_isr_handler_add(
-                s_buttons[i].gpio,
-                input_gpio_isr,
-                (void *)&s_buttons[i]));
+        esp_err_t err = gpio_isr_handler_add(
+                s_buttons[i].gpio, input_gpio_isr, (void *)&s_buttons[i]);
+
+        printf("handler_add=%s\n", esp_err_to_name(err));
     }
 
     ESP_LOGI(TAG, "%d buttons initialized", BUTTON_COUNT);

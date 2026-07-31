@@ -23,8 +23,6 @@ esp_err_t camera_start(void);
 
 camera_capture_mode_t camera_get_capture_mode(void);
 
-esp_err_t camera_capture_photo(void);
-
 bool camera_flash_enabled(void);
 
 #ifdef __cplusplus

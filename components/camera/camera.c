@@ -94,9 +94,9 @@ static void camera_set_flash_mode(bool enable);
 
 static void camera_set_capture_mode(camera_capture_mode_t mode);
 
-// esp_err_t camera_capture_photo(void);
+static void camera_capture_photo(void);
 
-static esp_err_t camera_capture_video(void);
+static void camera_capture_video(void);
 
 static esp_err_t camera_save_photo(camera_fb_t *fb);
 
@@ -154,18 +154,15 @@ static void camera_handle_toggle_flash_mode(void)
 // capture handler, execute capture when button pressed
 static void camera_handle_capture(void)
 {   
-    esp_err_t ret;
     if(s_camera.capture_mode == CAMERA_CAPTURE_PHOTO)
     {
         ESP_LOGI(TAG,"Calling handler for capture photo");
-        ret = camera_capture_photo();
+        camera_capture_photo();
     } else 
     {
         ESP_LOGI(TAG, "Calling handler for capture video");
-        ret = camera_capture_video();
+        camera_capture_video();
     }
-
-    if(ret != ESP_OK) ESP_LOGW(TAG, "Capture failed");
 }
 
 // open gallery mode
@@ -182,7 +179,7 @@ static esp_err_t camera_save_photo(camera_fb_t *fb)
     return storage_save_jpeg(fb->buf, fb->len);
 }
 
-esp_err_t camera_capture_photo(void)
+static void camera_capture_photo(void)
 {
     ESP_LOGI(TAG,"Capturing photo...");
     camera_fb_t *fb = esp_camera_fb_get();
@@ -190,7 +187,6 @@ esp_err_t camera_capture_photo(void)
     if(fb == NULL)
     {
         ESP_LOGE(TAG, "Camera capture failed.");
-        return ESP_FAIL;
     }
 
     ESP_LOGI(TAG, "Photo captured (%d bytes)", (unsigned)fb->len);
@@ -200,17 +196,14 @@ esp_err_t camera_capture_photo(void)
     esp_camera_fb_return(fb);
     if (ret != ESP_OK){
         ESP_LOGE(TAG, "Cannot save photo");
-        return ret;
     }
-    return ESP_OK;
 }
 
 // record video
-static esp_err_t camera_capture_video(void)
+static void camera_capture_video(void)
 {
     ESP_LOGI(TAG, "Video mode / (NOT IMPLEMENTED YET)");
     // to do later
-    return ESP_OK;
 }
 
 // camera driver init
@@ -218,17 +211,17 @@ static esp_err_t camera_driver_init(void)
 {
     esp_err_t ret = esp_camera_init(&s_camera_config);
 
-    camera_fb_t *fb = esp_camera_fb_get();
-
-    if (fb)
-    {
-        ESP_LOGI(TAG, "Discard first frame (%u bytes)", (unsigned)fb->len);
-        esp_camera_fb_return(fb);
-    }
-
     if(ret != ESP_OK){
         ESP_LOGE(TAG, "Camera init failed %s", esp_err_to_name(ret));
         return ret;
+    }
+
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if(fb)
+    {
+        ESP_LOGI(TAG,"Discard first frame");
+        esp_camera_fb_return(fb);
     }
 
     sensor_t *sensor = esp_camera_sensor_get();
@@ -263,8 +256,7 @@ static void camera_task(void *arg)
 
     while(true)
     {
-        if(events_receive(s_subscriber, 
-                &event, portMAX_DELAY) != pdTRUE) continue;
+        if(events_receive(s_subscriber, &event, portMAX_DELAY) != pdTRUE) continue;
 
         ESP_LOGI(TAG, "Receive channel=%d type=%d",
          event.channel, event.type.raw);
@@ -281,13 +273,14 @@ static void camera_task(void *arg)
         
         handler();
     }
-
 }
 
 esp_err_t camera_init(void)
 {
     ESP_ERROR_CHECK(camera_driver_init());
-    ESP_ERROR_CHECK(camera_flash_init());
+
+    // tam thoi ko dong vao
+    // ESP_ERROR_CHECK(camera_flash_init());
 
     s_subscriber = events_subscribe(EVENT_MASK_CAMERA, CAMERA_EVENT_QUEUE_LENGTH);
 
