@@ -5,8 +5,12 @@
 #include "esp_log.h"
 #include "esp_camera.h"
 
+#include "stdio.h"
+#include "sys/stat.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/semphr.h"
 
 #include "events.h"
 #include "mode.h"
@@ -22,12 +26,19 @@
 #define CAMERA_TASK_PRIORITY        6
 #define CAMERA_EVENT_QUEUE_LENGTH   5
 #define CAMERA_FLASH_GPIO           4
-
+#define CAMERA_FLASH_DELAY_MS       10
+#define VIDEO_DIRECTORY             "/sdcard/videos"
+#define CAMERA_VIDEO_FPS            5
+#define CAMERA_VIDEO_TASK_DELAY_MS  200
 // private types
 typedef struct 
 {
     bool flash_enabled;
     camera_capture_mode_t capture_mode;
+
+    bool recording;
+    storage_video_t *video;
+
 } camera_state_t;
 
 typedef void (*camera_handler_t)(void);
@@ -36,10 +47,16 @@ typedef void (*camera_handler_t)(void);
 static camera_state_t s_camera =
 {
     .flash_enabled = false,
-    .capture_mode  = CAMERA_CAPTURE_PHOTO
+    .capture_mode  = CAMERA_CAPTURE_PHOTO,
+    .recording = false,
+    .video = NULL
 };
 
 static TaskHandle_t s_camera_task = NULL;
+
+static TaskHandle_t s_video_taks = NULL;
+
+static SemaphoreHandle_t s_video_mutex = NULL;
 
 static event_subscriber_t *s_subscriber = NULL;
 
@@ -70,8 +87,8 @@ static camera_config_t s_camera_config =
     .ledc_channel = LEDC_CHANNEL_0,
 
     .pixel_format = PIXFORMAT_JPEG,
-    .frame_size = FRAMESIZE_FHD,
-    .jpeg_quality = 8,
+    .frame_size = FRAMESIZE_VGA,
+    .jpeg_quality = 15,
     .fb_count = 1,
     .fb_location = CAMERA_FB_IN_PSRAM,
     .grab_mode = CAMERA_GRAB_WHEN_EMPTY
@@ -79,6 +96,8 @@ static camera_config_t s_camera_config =
 
 // private function prototypes
 static void camera_task(void *arg);
+
+static void video_task(void *arg);
 
 // event handlers
 static void camera_handle_capture(void);
@@ -99,6 +118,14 @@ static void camera_capture_photo(void);
 static void camera_capture_video(void);
 
 static esp_err_t camera_save_photo(camera_fb_t *fb);
+
+static bool camera_is_recording(void);
+
+static esp_err_t camera_start_video(void);
+
+static esp_err_t camera_stop_video(void);
+
+static esp_err_t camera_record_frame(void);
 
 // dispatch table
 static const camera_handler_t s_camera_handlers[CAMERA_EVENT_COUNT] = 
@@ -125,6 +152,11 @@ camera_capture_mode_t camera_get_capture_mode(void)
 
 static void camera_handle_toggle_capture_mode(void)
 {
+    if(camera_is_recording()){
+        ESP_LOGW(TAG, "Cannot change capture mode while recording");
+        return;
+    }
+
     if(s_camera.capture_mode == CAMERA_CAPTURE_PHOTO)
     {
         camera_set_capture_mode(CAMERA_CAPTURE_VIDEO);
@@ -182,11 +214,19 @@ static esp_err_t camera_save_photo(camera_fb_t *fb)
 static void camera_capture_photo(void)
 {
     ESP_LOGI(TAG,"Capturing photo...");
+
+    if(s_camera.flash_enabled){
+        gpio_set_level(CAMERA_FLASH_GPIO, 1);
+        vTaskDelay(pdMS_TO_TICKS(CAMERA_FLASH_DELAY_MS));
+    }
+
     camera_fb_t *fb = esp_camera_fb_get();
+
+    gpio_set_level(CAMERA_FLASH_GPIO, 0);
 
     if(fb == NULL)
     {
-        ESP_LOGE(TAG, "Camera capture failed.");
+        ESP_LOGE(TAG, "Camera capture failed."); return ;
     }
 
     ESP_LOGI(TAG, "Photo captured (%d bytes)", (unsigned)fb->len);
@@ -199,11 +239,130 @@ static void camera_capture_photo(void)
     }
 }
 
-// record video
+// RECORD VIDEO
+static bool camera_is_recording(void)
+{
+    bool recording;
+
+    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+
+    recording = s_camera.recording;
+    xSemaphoreGive(s_video_mutex);
+    return recording;
+}
+
+static esp_err_t camera_start_video(void){
+    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+
+   if(s_camera.recording){
+        xSemaphoreGive(s_video_mutex);
+        return ESP_OK;
+   }
+
+   s_camera.recording = true;
+   s_camera.video = NULL;
+
+   xSemaphoreGive(s_video_mutex);
+    
+   ESP_LOGI(TAG, "Video recording started");
+
+    return ESP_OK;
+
+}
+
+static esp_err_t camera_stop_video(void)
+{
+    storage_video_t *video = NULL;
+
+    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+
+    if(!s_camera.recording){
+        xSemaphoreGive(s_video_mutex);
+        return ESP_OK;
+    }
+
+    // stop accepting new frames
+    s_camera.recording = false;
+    video = s_camera.video;
+    s_camera.video = NULL;
+
+    xSemaphoreGive(s_video_mutex);
+
+    // finalize avi
+    if(video != NULL){
+        esp_err_t ret = storage_video_close(video);
+        if(ret != ESP_OK){
+            ESP_LOGE(TAG, "Cannot finalize video");
+            return ret;
+        }
+    }
+    ESP_LOGI(TAG, "Stopped recording video");
+    return ESP_OK;
+}
+
+static esp_err_t camera_record_frame(void)
+{
+    // check recording state first
+    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+
+    if(!s_camera.recording){
+        xSemaphoreGive(s_video_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    xSemaphoreGive(s_video_mutex);
+
+    // capture frame
+    camera_fb_t *fb = esp_camera_fb_get();
+
+    if(fb == NULL){
+        ESP_LOGE(TAG, "Failed to capture video frame");
+        return ESP_FAIL;
+    }
+    esp_err_t ret = ESP_OK;
+
+    // protect video context while creating/writing frames
+    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+
+    if(!s_camera.recording){
+        xSemaphoreGive(s_video_mutex);
+        esp_camera_fb_return(fb);
+        return ESP_ERR_INVALID_STATE;
+    }
+   
+    // first frame , create avi
+    if(s_camera.video == NULL){
+        s_camera.video = storage_video_create(fb->width, fb->height, CAMERA_VIDEO_FPS);
+        if(s_camera.video == NULL){
+            ESP_LOGE(TAG, "Cannot create video file");
+            xSemaphoreGive(s_video_mutex);
+            esp_camera_fb_return(fb);
+            return ESP_FAIL;
+        }
+    }
+
+    // write jpeg frame into avi
+    ret = storage_video_write_frame(s_camera.video, fb->buf, fb->len);
+    xSemaphoreGive(s_video_mutex);
+    esp_camera_fb_return(fb);
+
+    if(ret != ESP_OK){
+        ESP_LOGE(TAG, "cannot write video frame: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    return ESP_OK;
+}
+
 static void camera_capture_video(void)
 {
-    ESP_LOGI(TAG, "Video mode / (NOT IMPLEMENTED YET)");
-    // to do later
+    if(camera_is_recording()){
+        ESP_LOGI(TAG, "Stopping video recording..");
+        if(camera_stop_video() != ESP_OK) ESP_LOGE(TAG, "Failed to stop video recording...");
+    } else {
+        ESP_LOGI(TAG, "Starting video recording..");
+        if(camera_start_video() != ESP_OK) ESP_LOGE(TAG, "Failed to start video recording");
+
+    }
 }
 
 // camera driver init
@@ -242,9 +401,10 @@ static esp_err_t camera_flash_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&io));
+    // default flash led turn off, but MODE ON
     gpio_set_level(CAMERA_FLASH_GPIO, 0);
     s_camera.flash_enabled = false;
-    ESP_LOGI(TAG, "Flash initialized");
+    ESP_LOGI(TAG, "Flash initialized, mode OFF");
     return ESP_OK;
 }
 
@@ -275,38 +435,88 @@ static void camera_task(void *arg)
     }
 }
 
+// video task
+static void video_task(void *arg)
+{
+    ESP_LOGI(TAG, "Video task started");
+    
+    const TickType_t frame_period = pdMS_TO_TICKS(1000 / CAMERA_VIDEO_FPS);
+    TickType_t last_wake_time = xTaskGetTickCount();
+
+    while(true)
+    {
+        if(!camera_is_recording()){
+            vTaskDelay(pdMS_TO_TICKS(50));
+            last_wake_time = xTaskGetTickCount();
+            continue;
+        }
+
+        esp_err_t ret = camera_record_frame();
+
+        if(ret != ESP_OK){
+            ESP_LOGE(TAG, "Failed to record frame");
+            camera_stop_video(); continue;
+        }
+
+        vTaskDelayUntil(&last_wake_time, frame_period);
+    }
+}
+
+// initialization
 esp_err_t camera_init(void)
 {
     ESP_ERROR_CHECK(camera_driver_init());
+    ESP_ERROR_CHECK(camera_flash_init());
 
-    // tam thoi ko dong vao
-    // ESP_ERROR_CHECK(camera_flash_init());
+    s_video_mutex = xSemaphoreCreateMutex();
+
+    if(s_video_mutex == NULL){
+        ESP_LOGE(TAG, "Cannot create video mutex");
+        return ESP_ERR_NO_MEM;
+    }
 
     s_subscriber = events_subscribe(EVENT_MASK_CAMERA, CAMERA_EVENT_QUEUE_LENGTH);
 
     if(s_subscriber == NULL) return ESP_FAIL;
 
-    ESP_LOGI(TAG, "Camera initialized");
+    ESP_LOGI(TAG, "Camera initialized driver and flash.");
     return ESP_OK;
 }
 
 esp_err_t camera_start(void)
 {
-    if(s_camera_task != NULL) return ESP_OK;
+    if(s_camera_task == NULL){
+        BaseType_t ret = xTaskCreate(
+                            camera_task, 
+                            "camera task",
+                            CAMERA_TASK_STACK_SIZE,
+                            NULL,
+                            CAMERA_TASK_PRIORITY,
+                            &s_camera_task);
 
-    BaseType_t ret = xTaskCreate(
-                        camera_task, 
-                        "camera task",
-                        CAMERA_TASK_STACK_SIZE,
-                        NULL,
-                        CAMERA_TASK_PRIORITY,
-                        &s_camera_task);
+        if(ret != pdPASS){
+            ESP_LOGE(TAG, "Cannot create camera task");
+            return ESP_FAIL;
+        }
 
-    if(ret != pdPASS){
-        ESP_LOGE(TAG, "Cannot create camera task");
-        return ESP_FAIL;
+        ESP_LOGI(TAG, "Camera task created");
     }
 
-    ESP_LOGI(TAG, "Camera task created");
+    if(s_video_taks == NULL){
+        BaseType_t ret = xTaskCreate(
+                            video_task,
+                            "video task",
+                            4096,
+                            NULL,
+                            CAMERA_TASK_PRIORITY,
+                            &s_video_taks);
+        if(ret != pdPASS){
+            ESP_LOGE(TAG, "Cannot create video task");
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Video task created");
+    }
+
     return ESP_OK;
+
 }

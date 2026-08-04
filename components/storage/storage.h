@@ -22,6 +22,8 @@ typedef struct
     uint32_t image_count;
 } storage_index_t;
 
+typedef struct storage_video storage_video_t;
+
 /**
  * @brief Mount SD card and prepare photos folder
  */
@@ -71,6 +73,22 @@ esp_err_t storage_open_uri(const char *uri, FILE **fp);
 
 // Close storage
 void storage_close(FILE *fp);
+
+storage_video_t *storage_video_create(
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps
+);
+
+esp_err_t storage_video_write_frame(
+    storage_video_t *video,
+    const uint8_t *data,
+    size_t len
+);
+
+esp_err_t storage_video_close(storage_video_t *video);
+
+esp_err_t storage_video_abort(storage_video_t *video);
 
 #ifdef __cplustplus
 }

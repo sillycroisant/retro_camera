@@ -146,7 +146,7 @@ esp_err_t events_publish(const event_t *event)
 {   
     if(event == NULL) return ESP_ERR_INVALID_ARG;
 
-    ESP_LOGI(TAG, "Publish mask=%08lx", (unsigned long)(1UL << event->channel));
+    // ESP_LOGI(TAG, "Publish mask=%08lx", (unsigned long)(1UL << event->channel));
     
     if(!s_initialized) return ESP_ERR_INVALID_STATE;
 
@@ -168,7 +168,7 @@ esp_err_t events_publish(const event_t *event)
     {
         event_subscriber_t *subscriber = &s_subscribers[i];
         
-        ESP_LOGI(TAG, "subscriber=%d mask=%08lx", i, (unsigned long)s_subscribers[i].channel_mask);
+        // ESP_LOGI(TAG, "subscriber=%d mask=%08lx", i, (unsigned long)s_subscribers[i].channel_mask);
 
         if(subscriber->queue == NULL) continue;
 

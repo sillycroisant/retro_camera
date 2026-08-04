@@ -2,6 +2,7 @@
 #include "storage.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <dirent.h>
 #include <sys/stat.h>
@@ -17,6 +18,7 @@
 
 #define STORAGE_ROOT    "/sdcard"
 #define PHOTO_DIRECTORY "/sdcard/photos"
+#define VIDEO_DIRECTORY "/sdcard/videos"
 #define INDEX_FILE      "/sdcard/index.dat"
 #define STORAGE_INDEX_MAGIC NULL
 #define STORAGE_INDEX_VERSION 1
@@ -34,6 +36,35 @@ static char latest_path[128] = "";
 static char latest_filename[32] = "";
 
 static storage_index_t g_index;
+
+typedef struct __attribute__((packed))
+{
+    uint32_t offset;
+    uint32_t size;
+
+} avi_index_entry_t;
+
+struct storage_video
+{
+    FILE *file;
+
+    uint32_t width;
+    uint32_t height;
+    uint32_t fps;
+
+    uint32_t frame_count;
+
+    long movi_list_offset;
+    long movi_data_offset;
+    long avih_frames_offset;
+    long strh_frames_offset;
+
+    avi_index_entry_t *index;
+    size_t index_count;
+    size_t index_capacity;
+
+    char path[64];
+};
 
 //functions
 static void storage_scan_directory(void)
@@ -308,16 +339,6 @@ esp_err_t storage_open_uri(
 
     *fp = fopen(path, "rb");
     
-    // // debuf html
-    // char test[256] = {0};
-
-    // FILE *dbg = fopen("/sdcard/www/index.html", "rb");
-    // fread(test, 1, sizeof(test)-1, dbg);
-    // fclose(dbg);
-
-    // ESP_LOGI(TAG, "index.html:\n%s", test);
-    // // end debugging
-    
     if(*fp == NULL){
         ESP_LOGE(TAG, "Cannot open file");
         return ESP_ERR_NOT_FOUND;
@@ -330,4 +351,417 @@ void storage_close(FILE *fp)
     if (fp != NULL){
         fclose(fp);
     }
+}
+
+// helper for avi header
+static bool storage_write_u32(FILE *file, uint32_t value)
+{
+    return fwrite(&value, sizeof(value), 1, file) == 1;
+}
+
+static bool storage_write_fourcc(FILE *file, const char *fourcc)
+{
+    return fwrite(fourcc, 1, 4, file) == 4;
+}
+
+static esp_err_t storage_video_write_header(storage_video_t *video)
+{
+    FILE *f = video->file;
+
+    uint32_t microseconds_per_frame = 1000000UL / video->fps;
+    
+    // riff
+    storage_write_fourcc(f, "RIFF");
+
+    uint32_t riff_size_placeholder = 0;
+    storage_write_u32(f, riff_size_placeholder);
+
+    storage_write_fourcc(f, "AVI ");
+
+    // list hdrl
+    storage_write_fourcc(f, "LIST");
+    uint32_t hdrl_size = 192;
+    storage_write_u32(f, hdrl_size);
+    storage_write_fourcc(f, "hdrl");
+
+    // avih
+    storage_write_fourcc(f, "avih");
+    uint32_t avih_size = 56;
+    storage_write_u32(f, avih_size);
+
+    uint32_t avih[14] = 
+    {
+        microseconds_per_frame,     // dwMicroSecPerFrame
+        0,                          // dwMaxBytesPerSec
+        0,                          // dwPaddingGranularity
+        0x10,                       // dwFlags = AVIF_HASINDEX
+        0,                          // dwTotalFrames
+        0,                          // dwInitialFrames
+        1,                          // dwStreams
+        0,                          // dwSuggestedBufferSize
+        video->width,               // dwWidth
+        video->height,              // dwHeight
+        0, 0, 0, 0                  // reserved
+    };
+
+    if( fwrite(avih, sizeof(avih), 1, f) != 1) return ESP_FAIL;
+
+    // list strl
+    storage_write_fourcc(f, "LIST");
+    uint32_t strl_size = 116;
+    storage_write_u32(f, strl_size);
+    storage_write_fourcc(f, "strl");
+
+    // strh
+    storage_write_fourcc(f,"strh");
+    uint32_t strh_size = 56;
+    storage_write_u32(f, strh_size);
+    storage_write_fourcc(f, "vids");
+    storage_write_fourcc(f,"MJPG");
+
+    uint32_t strh[10]=
+    {
+        0,                          // dwFlags
+        0,                          // wPriority + wLanguage
+        0,                          // dwInitialFrames
+        1,                          // dwScale
+        video->fps,                 // dwRate
+        0,                          // dwStart
+        0,                          // dwLength
+        0,                          // dwSuggestedBufferSize
+        0xFFFFFFFF,                 // dwQuality
+        0                           // dwSampleSize
+    };
+
+    if(fwrite(strh, sizeof(strh), 1, f) != 1) return ESP_FAIL;
+
+    uint16_t frame_left = 0;
+    uint16_t frame_top = 0;
+    uint16_t frame_right = video->width;
+    uint16_t frame_bottom = video->height;
+
+    if(fwrite(&frame_left, sizeof(frame_left), 1, f) != 1) return ESP_FAIL;
+    if(fwrite(&frame_top, sizeof(frame_top), 1, f) != 1) return ESP_FAIL;
+    if(fwrite(&frame_right, sizeof(frame_right), 1, f) != 1) return ESP_FAIL;
+    if(fwrite(&frame_bottom, sizeof(frame_bottom), 1, f) != 1) return ESP_FAIL;
+
+    // strf - bitmap info header
+    storage_write_fourcc(f, "strf");
+    uint32_t strf_size = 40;
+    storage_write_u32(f, strf_size);
+
+    uint32_t bitmap_size = 40;
+    int32_t bitmap_width = video->width;
+    int32_t bitmap_height = video->height;
+
+    uint16_t planes = 1;
+    uint16_t bit_count = 24;
+
+    uint32_t compression = 0x47504A4D; // "MJPG" little endian
+
+    uint32_t image_size = 0;
+    int32_t xppm = 0;
+    int32_t yppm = 0;
+    uint32_t colors_used = 0;
+    uint32_t colors_important = 0;
+
+    fwrite(&bitmap_size, sizeof(bitmap_size), 1, f);
+    fwrite(&bitmap_width, sizeof(bitmap_width), 1, f);
+    fwrite(&bitmap_height, sizeof(bitmap_height), 1, f);
+    fwrite(&planes, sizeof(planes), 1, f);
+    fwrite(&bit_count, sizeof(bit_count), 1, f);
+    fwrite(&compression, sizeof(compression), 1, f);
+    fwrite(&image_size, sizeof(image_size), 1, f);
+    fwrite(&xppm, sizeof(xppm), 1, f);
+    fwrite(&yppm, sizeof(yppm), 1, f);
+    fwrite(&colors_used, sizeof(colors_used), 1, f);
+    fwrite(&colors_important, sizeof(colors_important), 1, f);
+
+
+    // LIST movi
+    video->movi_list_offset = ftell(f);
+    storage_write_fourcc(f, "LIST");
+    uint32_t movi_size_placeholder = 0;
+    storage_write_u32(f, movi_size_placeholder);
+    storage_write_fourcc(f, "movi");
+    video->movi_data_offset = ftell(f);
+
+    return ESP_OK;
+}
+
+static esp_err_t storage_video_reserve_index(storage_video_t *video)
+{
+    if(video->index_count < video->index_capacity) return ESP_OK;
+
+    size_t new_capacity = video->index_capacity == 0 ? 256 : video->index_capacity * 2;
+
+    avi_index_entry_t *new_index = realloc(video->index, new_capacity * sizeof(avi_index_entry_t));
+
+    if(new_index == NULL){
+        ESP_LOGE(TAG, "Cannot allocate AVI index");
+        return ESP_ERR_NO_MEM;
+    }
+
+    video->index = new_index;
+    video->index_capacity = new_capacity;
+
+    return ESP_OK;
+}
+
+
+storage_video_t *storage_video_create(
+    uint32_t width,
+    uint32_t height,
+    uint32_t fps
+) 
+{    
+    if(width == 0 || height == 0 || fps == 0) return NULL;
+
+    struct stat st;
+    // create video directory if needed
+    if(stat(VIDEO_DIRECTORY, &st) != 0)
+    {
+        if(mkdir(VIDEO_DIRECTORY, 0775) != 0){
+            ESP_LOGE(TAG, "Cannot create %s", VIDEO_DIRECTORY);
+            return NULL;
+        }
+    }
+
+    storage_video_t *video = calloc(1, sizeof(storage_video_t));
+
+    if(video == NULL) {
+        ESP_LOGI(TAG, "Cannot allocate video context");
+        return NULL;
+    }
+    video->width = width;
+    video->height = height;
+    video->fps = fps;
+
+    // find unused filename
+    bool found = false;
+    for(uint32_t i = 0; i < 10000; i++){
+        snprintf(
+            video->path,
+            sizeof(video->path),
+            VIDEO_DIRECTORY "/video_%06lu.avi",
+            (unsigned long)i
+        );
+
+        if (stat(video->path, &st) != 0)
+        {
+            if (errno == ENOENT)
+            {
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if(!found){
+        ESP_LOGE(TAG, "Cannot find unused video filename");
+        free(video);
+        return NULL;
+    }
+
+    video->file = fopen(video->path, "wb");
+
+    if(video->file == NULL){
+        ESP_LOGE(TAG, "Cannot create %s, errno=%d", video->path, errno);
+        free(video);
+        return NULL;
+    }
+
+    esp_err_t ret = storage_video_write_header(video);
+    if(ret != ESP_OK){
+        fclose(video->file);
+        remove(video->path);
+        free(video);
+        return NULL;
+    }
+
+    ESP_LOGI(TAG, "Video created: %s (%lux%lu @ %lu FPS)",
+        video->path,
+        (unsigned long)video->width,
+        (unsigned long)video->height,
+        (unsigned long)video->fps);
+
+    return video;
+}
+
+esp_err_t storage_video_write_frame(
+    storage_video_t *video,
+    const uint8_t *data,
+    size_t len)
+{
+    if (video == NULL || video->file == NULL) return ESP_ERR_INVALID_STATE;
+
+    if (data == NULL || len == 0) return ESP_ERR_INVALID_ARG;
+
+    if (len > UINT32_MAX) return ESP_ERR_INVALID_SIZE;
+
+    esp_err_t ret = storage_video_reserve_index(video);
+
+    if (ret != ESP_OK) return ret;
+
+    FILE *f = video->file;
+
+    long frame_position = ftell(f);
+
+    if (frame_position < 0) return ESP_FAIL;
+
+    uint32_t offset = (uint32_t)(frame_position - video->movi_data_offset);
+
+    // MJPEG video frame
+    if (!storage_write_fourcc(f, "00dc")) return ESP_FAIL;
+
+    uint32_t frame_size = (uint32_t)len;
+
+    if (!storage_write_u32(f, frame_size)) return ESP_FAIL;
+
+    if (fwrite(data, 1, len, f) != len) return ESP_FAIL;
+
+    /*
+     * AVI chunks must be WORD aligned.
+     */
+
+    if (len & 1)
+    {
+        uint8_t padding = 0;
+
+        if (fwrite(&padding, 1, 1, f) != 1) return ESP_FAIL;
+    }
+
+    video->index[video->index_count].offset = offset;
+    video->index[video->index_count].size = frame_size;
+
+    video->index_count++;
+    video->frame_count++;
+
+    return ESP_OK;
+}
+
+esp_err_t storage_video_close(storage_video_t *video)
+{
+    if (video == NULL)
+        return ESP_ERR_INVALID_ARG;
+
+    if (video->file == NULL)
+    {
+        free(video->index);
+        free(video);
+        return ESP_OK;
+    }
+
+    FILE *f = video->file;
+
+    // End of movi
+    long movi_end = ftell(f);
+
+    if (movi_end < 0)
+    {
+        fclose(f);
+        free(video->index);
+        free(video);
+        return ESP_FAIL;
+    }
+
+    // Write idx1
+
+    storage_write_fourcc(f, "idx1");
+
+    uint32_t index_size =
+        video->frame_count * 16;
+
+    storage_write_u32(f, index_size);
+
+    for (uint32_t i = 0; i < video->frame_count; i++)
+    {
+        storage_write_fourcc(f, "00dc");
+
+        uint32_t flags = 0x10;
+
+        storage_write_u32(f, flags);
+
+        storage_write_u32(f, video->index[i].offset);
+
+        storage_write_u32(f, video->index[i].size);
+    }
+
+    // Final file size
+    long file_end = ftell(f);
+
+    if (file_end < 0)
+    {
+        fclose(f);
+        free(video->index);
+        free(video);
+        return ESP_FAIL;
+    }
+
+    // RIFF size = file size - 8
+    uint32_t riff_size = (uint32_t)(file_end - 8);
+
+    // movi LIST size
+    // Includes "movi" + all chunks.
+    uint32_t movi_size = 
+        (uint32_t)(movi_end - (video->movi_list_offset + 8));
+
+
+    // Patch RIFF size
+    fseek(f, 4, SEEK_SET);
+    fwrite(&riff_size, sizeof(riff_size), 1, f);
+
+
+    // Patch total frame count in avih
+    // Offset 48
+    fseek(f, 48, SEEK_SET);
+
+    fwrite(&video->frame_count, sizeof(video->frame_count), 1, f);
+
+
+    // Patch stream frame count
+    // Offset 140
+    fseek(f, 140, SEEK_SET);
+    fwrite(&video->frame_count, sizeof(video->frame_count), 1, f);
+
+
+    // Patch movi size
+    fseek(f, video->movi_list_offset + 4, SEEK_SET);
+
+    fwrite(&movi_size, sizeof(movi_size), 1, f);
+
+    fflush(f);
+    fclose(f);
+
+    ESP_LOGI(TAG, "Video saved: %s (%lu frames)",
+        video->path, (unsigned long)video->frame_count);
+
+    free(video->index);
+    free(video);
+
+    return ESP_OK;
+}
+
+esp_err_t storage_video_abort(storage_video_t *video)
+{
+    if (video == NULL)
+        return ESP_ERR_INVALID_ARG;
+
+    if (video->file != NULL)
+    {
+        fclose(video->file);
+        video->file = NULL;
+    }
+
+    if (video->path[0] != '\0')
+    {
+        remove(video->path);
+    }
+
+    free(video->index);
+    free(video);
+
+    ESP_LOGW(TAG, "Video recording aborted");
+
+    return ESP_OK;
 }
