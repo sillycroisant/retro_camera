@@ -28,8 +28,8 @@
 #define CAMERA_FLASH_GPIO           4
 #define CAMERA_FLASH_DELAY_MS       10
 #define VIDEO_DIRECTORY             "/sdcard/videos"
-#define CAMERA_VIDEO_FPS            5
-#define CAMERA_VIDEO_TASK_DELAY_MS  200
+#define CAMERA_VIDEO_FPS            10
+
 // private types
 typedef struct 
 {
@@ -361,7 +361,6 @@ static void camera_capture_video(void)
     } else {
         ESP_LOGI(TAG, "Starting video recording..");
         if(camera_start_video() != ESP_OK) ESP_LOGE(TAG, "Failed to start video recording");
-
     }
 }
 
@@ -439,22 +438,34 @@ static void camera_task(void *arg)
 static void video_task(void *arg)
 {
     ESP_LOGI(TAG, "Video task started");
-    
     const TickType_t frame_period = pdMS_TO_TICKS(1000 / CAMERA_VIDEO_FPS);
+    bool was_recording = false;
     TickType_t last_wake_time = xTaskGetTickCount();
 
     while(true)
-    {
-        if(!camera_is_recording()){
-            vTaskDelay(pdMS_TO_TICKS(50));
+    {   
+        bool recording = camera_is_recording();
+
+        // detect transist false -> true = start recordings
+        if(recording && !was_recording){
+            ESP_LOGI(TAG, "Video tasK: recording started");
             last_wake_time = xTaskGetTickCount();
-            continue;
+        }
+
+        // detect transist true -> false = stop recording
+        if(!recording && was_recording){
+            ESP_LOGI(TAG," Video task: recording stopped");
+        }
+        was_recording = recording;
+
+        // not recording
+        if(!recording){
+            vTaskDelay(pdMS_TO_TICKS(10)); continue;
         }
 
         esp_err_t ret = camera_record_frame();
-
         if(ret != ESP_OK){
-            ESP_LOGE(TAG, "Failed to record frame");
+            ESP_LOGE(TAG,"Failed to record frame");
             camera_stop_video(); continue;
         }
 

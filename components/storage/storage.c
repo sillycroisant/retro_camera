@@ -25,6 +25,10 @@
 #define STORAGE_MOUNT_POINT "/sdcard"
 #define STORAGE_WWW_DIR "/www"
 
+#define SDMMC_PIN_CLK GPIO_NUM_39
+#define SDMMC_PIN_CMD GPIO_NUM_38
+#define SDMMC_PIN_D0  GPIO_NUM_40
+
 static const char *TAG = "[Storage]";
 
 static sdmmc_card_t *card = NULL;
@@ -151,22 +155,32 @@ esp_err_t storage_init(void){
     sdmmc_host_t host = SDMMC_HOST_DEFAULT();
     sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
 
-    // AI Thinker esp32-cam
-    // using 1but mode for stablity
     slot_config.width = 1;
+    slot_config.clk = SDMMC_PIN_CLK;
+    slot_config.cmd = SDMMC_PIN_CMD;
+    slot_config.d0  = SDMMC_PIN_D0;
+
+    slot_config.flags |= SDMMC_SLOT_FLAG_INTERNAL_PULLUP;
 
     esp_err_t ret = esp_vfs_fat_sdmmc_mount(
-        "/sdcard",
+        STORAGE_ROOT,
         &host,
         &slot_config,
         &mount_config,
-        &card);
+        &card
+    );
 
-    if (ret != ESP_OK) {
+    if(ret != ESP_OK){
         ESP_LOGE(TAG, "Failed to mount SD card (%s)", esp_err_to_name(ret));
         return ret;
     }
 
+    ESP_LOGI(TAG, "SD card initialized successfully!");
+
+    sdmmc_card_print_info(stdout, card);
+
+    ESP_LOGI(TAG, "esp_vfs_fat_sdmmc_mount() returned: %s (0x%x)", esp_err_to_name(ret), ret);
+    
     ESP_LOGI(TAG, "SD card mounted.");
     sdmmc_card_print_info(stdout, card);
     

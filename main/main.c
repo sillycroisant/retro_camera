@@ -1,100 +1,90 @@
-// #include <stdio.h>
-// #include "sdkconfig.h"
-// #include "esp_system.h"
-// #include <sys/param.h>
-// #include <string.h>
-
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
 #include "esp_camera.h"
 #include "esp_log.h"
 
+// #include "webserver.h"
+// #include "network.h"
+// #include "frontend.h"
+
 #include "camera.h"
 #include "storage.h"
-#include "webserver.h"
-#include "network.h"
-#include "frontend.h"
 #include "input.h"
 #include "events.h"
 #include "mode.h"
 
 static const char *TAG = "Main";
 
+static esp_err_t publish_camera_event(camera_event_type_t type)
+{
+    event_t event = {
+        .channel = EVENT_CHANNEL_CAMERA,
+        .type.camera = type,
+    };
+
+    return events_publish(&event);
+}
+
 static void camera_test_task(void *arg)
 {
-    while(1)
+    while(true)
     {
-        event_t event;
-
-        memset(&event, 0, sizeof(event));
-
-        event.channel = EVENT_CHANNEL_CAMERA;
-        event.type.camera = CAMERA_EVENT_CAPTURE;
-
-        ESP_LOGI("TEST", "=== Capture photo ===");
-
-        esp_err_t ret = events_publish(&event);
-
-        if(ret != ESP_OK){
-            ESP_LOGE("TEST", "events_publish failed: %s", esp_err_to_name(ret));
+        ESP_LOGI(TAG, "=== capture PHOTO ===");
+        if(publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
+            ESP_LOGE(TAG, "Failed to publish photo capture event");
         }
 
         vTaskDelay(pdMS_TO_TICKS(3000));
 
-        // switch photo -> video
-        memset(&event, 0, sizeof(event));
-        event.channel = EVENT_CHANNEL_CAMERA;
-        event.type.camera = CAMERA_EVENT_TOGGLE_VIDEO;
-
-        ESP_LOGI(TAG, "=== switch to video===");
-        events_publish(&event);
-
-        memset(&event, 0, sizeof(event));
-
-        event.channel = EVENT_CHANNEL_CAMERA;
-        event.type.camera = CAMERA_EVENT_CAPTURE;
-
-        ESP_LOGI("TEST", "=== Start record VIDEO ===");
-        events_publish(&event);
+        ESP_LOGI(TAG,"=== switch photo -> video ===");
+        if(publish_camera_event(CAMERA_EVENT_TOGGLE_VIDEO)!= ESP_OK){
+            ESP_LOGE(TAG, "Failed tp toggle capture mode");
+        }
+        ESP_LOGI(TAG,"=== start VIDEO recording ===");
+        if(publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
+            ESP_LOGE(TAG, "Failed to start video");
+        }
 
         vTaskDelay(pdMS_TO_TICKS(5000));
+        ESP_LOGI(TAG, "=== Stop VIDEO recording ===");
+        if (publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
+            ESP_LOGE(TAG, "Failed to stop video");
+        }
 
-        memset(&event, 0, sizeof(event));
-
-        event.channel = EVENT_CHANNEL_CAMERA;
-        event.type.camera = CAMERA_EVENT_CAPTURE;
-
-        ESP_LOGI("TEST", "=== Stop recording VIDEO  ===");
-        events_publish(&event);
-
+        ESP_LOGI(TAG, "=== Switch VIDEO -> PHOTO ===");
+        if (publish_camera_event(CAMERA_EVENT_TOGGLE_VIDEO) != ESP_OK){
+            ESP_LOGE(TAG, "Failed to toggle capture mode");
+        }
     }
 }
 
 void app_main(void)
 {
-
-    events_init();
-
-    mode_init();
-
-    camera_init();
+    // // tạo semaphore, mutex và queue để quản lý events
+    // events_init();
+    // // hỗ trợ thay đổi các chế độ trong camera
+    // mode_init();
+    // // ktra và kết nối vs module camera
+    // // camera_init();
+    // // ktra và kết nối vs thẻ nhớ
+    esp_log_level_set("sdmmc_cmd", ESP_LOG_DEBUG);
+    esp_log_level_set("sdmmc_common", ESP_LOG_DEBUG);
+    esp_log_level_set("sdmmc_host", ESP_LOG_DEBUG);
+    esp_log_level_set("diskio_sdmmc", ESP_LOG_DEBUG);
+    esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_DEBUG);
 
     storage_init();
 
     // input_init();
-
-    camera_start();
+    
+    // camera_start();
 
     // input_start();
     
     ESP_LOGI(TAG, "System ready");
     
-    BaseType_t ret = xTaskCreate(camera_test_task, "test", 4096, NULL, 3, NULL);
+    // BaseType_t ret = xTaskCreate(camera_test_task, "test", 4096, NULL, 3, NULL);
 
-    if(ret != pdPASS) ESP_LOGE(TAG, "Cannot create test task");
-
-    // while(1){
-    //     vTaskDelay(pdMS_TO_TICKS(1000));
-    // }
+    // if(ret != pdPASS) ESP_LOGE(TAG, "Cannot create test task");
 }
