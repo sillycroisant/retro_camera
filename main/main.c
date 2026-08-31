@@ -39,7 +39,7 @@ static void camera_test_task(void *arg)
 
         ESP_LOGI(TAG,"=== switch photo -> video ===");
         if(publish_camera_event(CAMERA_EVENT_TOGGLE_VIDEO)!= ESP_OK){
-            ESP_LOGE(TAG, "Failed tp toggle capture mode");
+                ESP_LOGE(TAG, "Failed tp toggle capture mode");
         }
         ESP_LOGI(TAG,"=== start VIDEO recording ===");
         if(publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
@@ -62,11 +62,11 @@ static void camera_test_task(void *arg)
 void app_main(void)
 {
     // // tạo semaphore, mutex và queue để quản lý events
-    // events_init();
+    events_init();
     // // hỗ trợ thay đổi các chế độ trong camera
-    // mode_init();
+    mode_init();
     // // ktra và kết nối vs module camera
-    // // camera_init();
+    camera_init();
     // // ktra và kết nối vs thẻ nhớ
     esp_log_level_set("sdmmc_cmd", ESP_LOG_DEBUG);
     esp_log_level_set("sdmmc_common", ESP_LOG_DEBUG);
@@ -78,7 +78,7 @@ void app_main(void)
 
     // input_init();
     
-    // camera_start();
+    camera_start();
 
     // input_start();
     

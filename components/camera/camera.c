@@ -4,6 +4,7 @@
 #include "stdbool.h"
 #include "esp_log.h"
 #include "esp_camera.h"
+#include "img_converters.h"
 
 #include "stdio.h"
 #include "sys/stat.h"
@@ -26,7 +27,7 @@
 #define CAMERA_TASK_PRIORITY        6
 #define CAMERA_EVENT_QUEUE_LENGTH   5
 #define CAMERA_FLASH_GPIO           4
-#define CAMERA_FLASH_DELAY_MS       10
+#define CAMERA_FLASH_DELAY_MS       80
 #define VIDEO_DIRECTORY             "/sdcard/videos"
 #define CAMERA_VIDEO_FPS            10
 
@@ -86,12 +87,13 @@ static camera_config_t s_camera_config =
     .ledc_timer = LEDC_TIMER_0,
     .ledc_channel = LEDC_CHANNEL_0,
 
-    .pixel_format = PIXFORMAT_JPEG,
+    .pixel_format = PIXFORMAT_RGB565,
     .frame_size = FRAMESIZE_VGA,
-    .jpeg_quality = 15,
-    .fb_count = 1,
+    .jpeg_quality = 10,
+    // esp32s3 có 8mb octal psram, nên dùng 2 framebuffer
+    .fb_count = 2,
     .fb_location = CAMERA_FB_IN_PSRAM,
-    .grab_mode = CAMERA_GRAB_WHEN_EMPTY
+    .grab_mode = CAMERA_GRAB_LATEST
 };
 
 // private function prototypes
@@ -213,7 +215,7 @@ static esp_err_t camera_save_photo(camera_fb_t *fb)
 
 static void camera_capture_photo(void)
 {
-    ESP_LOGI(TAG,"Capturing photo...");
+    ESP_LOGI(TAG,"Capturing photo... (RGB565 -> JPG) ...");
 
     if(s_camera.flash_enabled){
         gpio_set_level(CAMERA_FLASH_GPIO, 1);
@@ -229,15 +231,28 @@ static void camera_capture_photo(void)
         ESP_LOGE(TAG, "Camera capture failed."); return ;
     }
 
-    ESP_LOGI(TAG, "Photo captured (%d bytes)", (unsigned)fb->len);
-
-    esp_err_t ret = camera_save_photo(fb);
+    uint8_t *jpg_buf = NULL;
+    size_t jpg_len = 0;
+    bool converted = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
 
     esp_camera_fb_return(fb);
-    if (ret != ESP_OK){
-        ESP_LOGE(TAG, "Cannot save photo");
+    
+    if(!converted || jpg_buf == NULL){
+        ESP_LOGE(TAG, "JPEG compression failed");
+        return ;
     }
-}
+    
+    ESP_LOGI(TAG, "Compressed to JPEG: %u bytes", (unsigned)jpg_len);
+
+    esp_err_t ret = storage_save_jpeg(jpg_buf, jpg_len);
+    free(jpg_buf);
+
+    if (ret != ESP_OK){
+        ESP_LOGE(TAG, "Cannot save photo to sdcard");
+    } else {
+        ESP_LOGI(TAG, "Photo saved successfully");
+    }
+} 
 
 // RECORD VIDEO
 static bool camera_is_recording(void)
@@ -374,17 +389,40 @@ static esp_err_t camera_driver_init(void)
         return ret;
     }
 
-    camera_fb_t *fb = esp_camera_fb_get();
+    sensor_t *sensor = esp_camera_sensor_get();
+    if(sensor == NULL) {
+        ESP_LOGW(TAG, "Cannot get sensor");
+        return ESP_FAIL;
+    }
+    
+    ESP_LOGI(TAG, "Camera sensor initialized");
 
-    if(fb)
-    {
-        ESP_LOGI(TAG,"Discard first frame");
-        esp_camera_fb_return(fb);
+    // Phần này để cho vào menu setting các version sau...
+    // cấu hình đặc biệt để đánh thức ov3660
+    // sensor->set_vflip(sensor, 1);
+    // sensor->set_hmirror(sensor, 0);
+    // sensor->set_brightness(sensor, 1);
+    // sensor->set_saturation(sensor, 0);   // Độ bão hòa màu (-2 đến 2)
+
+    // sensor->set_framesize(sensor, FRAMESIZE_QVGA); // Đặt lại framesize
+    // sensor->set_quality(sensor, 10);     // Chất lượng JPEG (10 - 63)
+    
+    ESP_LOGI(TAG, "Camera sensor ov3660 initialized & configured");
+
+    // Đợi 200ms để cảm biến nạp cấu hình và ổn định luồng ảnh
+    vTaskDelay(pdMS_TO_TICKS(200));
+    // Đọc thử 2 frame đầu để xả buffer
+    for (int i = 0; i < 2; i++) {
+        camera_fb_t *fb = esp_camera_fb_get();
+        if (fb) {
+            ESP_LOGI(TAG, "Warmup frame %d received successfully (%u bytes)", i, (unsigned)fb->len);
+            esp_camera_fb_return(fb);
+        } else {
+            ESP_LOGW(TAG, "Warmup frame %d timed out", i);
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 
-    sensor_t *sensor = esp_camera_sensor_get();
-    if(sensor == NULL) ESP_LOGW(TAG, "Cannot get sensor");
-    else ESP_LOGI(TAG, "Camera sensor initialized");
     return ESP_OK;
 }
 
