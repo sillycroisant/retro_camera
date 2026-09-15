@@ -12,4 +12,6 @@ idf_component_register(
         events
         input
         mode
+        gallery
+        display
 )

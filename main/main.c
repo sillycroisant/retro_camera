@@ -13,51 +13,10 @@
 #include "input.h"
 #include "events.h"
 #include "mode.h"
+#include "gallery.h"
+#include "display.h"
 
 static const char *TAG = "Main";
-
-static esp_err_t publish_camera_event(camera_event_type_t type)
-{
-    event_t event = {
-        .channel = EVENT_CHANNEL_CAMERA,
-        .type.camera = type,
-    };
-
-    return events_publish(&event);
-}
-
-static void camera_test_task(void *arg)
-{
-    while(true)
-    {
-        ESP_LOGI(TAG, "=== capture PHOTO ===");
-        if(publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
-            ESP_LOGE(TAG, "Failed to publish photo capture event");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(3000));
-
-        ESP_LOGI(TAG,"=== switch photo -> video ===");
-        if(publish_camera_event(CAMERA_EVENT_TOGGLE_VIDEO)!= ESP_OK){
-                ESP_LOGE(TAG, "Failed tp toggle capture mode");
-        }
-        ESP_LOGI(TAG,"=== start VIDEO recording ===");
-        if(publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
-            ESP_LOGE(TAG, "Failed to start video");
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(5000));
-        ESP_LOGI(TAG, "=== Stop VIDEO recording ===");
-        if (publish_camera_event(CAMERA_EVENT_CAPTURE) != ESP_OK){
-            ESP_LOGE(TAG, "Failed to stop video");
-        }
-
-        ESP_LOGI(TAG, "=== Switch VIDEO -> PHOTO ===");
-        if (publish_camera_event(CAMERA_EVENT_TOGGLE_VIDEO) != ESP_OK){
-            ESP_LOGE(TAG, "Failed to toggle capture mode");
-        }
-    }
-}
 
 void app_main(void)
 {
@@ -67,22 +26,18 @@ void app_main(void)
     mode_init();
     // // ktra và kết nối vs module camera
     camera_init();
-    // // ktra và kết nối vs thẻ nhớ
-    esp_log_level_set("sdmmc_cmd", ESP_LOG_DEBUG);
-    esp_log_level_set("sdmmc_common", ESP_LOG_DEBUG);
-    esp_log_level_set("sdmmc_host", ESP_LOG_DEBUG);
-    esp_log_level_set("diskio_sdmmc", ESP_LOG_DEBUG);
-    esp_log_level_set("vfs_fat_sdmmc", ESP_LOG_DEBUG);
-
+    gallery_init();
     storage_init();
-
-    // input_init();
+    display_init();
+    input_init();
     
     camera_start();
+    gallery_start();
+    input_start();
 
-    // input_start();
-    
-    ESP_LOGI(TAG, "System ready");
+    display_show_latest_photo();
+
+    ESP_LOGI(TAG, "=== System ready ===");
     
     // BaseType_t ret = xTaskCreate(camera_test_task, "test", 4096, NULL, 3, NULL);
 

@@ -18,6 +18,8 @@
 #include "storage.h"
 #include "driver/gpio.h"
 
+#include "display.h"
+
 #include "camera_pinout.h"
 
 #define TAG "Camera"
@@ -206,12 +208,12 @@ static void camera_handle_open_gallery(void)
     mode_set(APP_MODE_GALLERY);
 }
 
-// photo capture
-static esp_err_t camera_save_photo(camera_fb_t *fb)
-{   
-    if(fb == NULL) return ESP_ERR_INVALID_ARG;
-    return storage_save_jpeg(fb->buf, fb->len);
-}
+// // photo capture
+// static esp_err_t camera_save_photo(camera_fb_t *fb)
+// {   
+//     if(fb == NULL) return ESP_ERR_INVALID_ARG;
+//     return storage_save_jpeg(fb->buf, fb->len);
+// }
 
 static void camera_capture_photo(void)
 {
@@ -231,6 +233,10 @@ static void camera_capture_photo(void)
         ESP_LOGE(TAG, "Camera capture failed."); return ;
     }
 
+    // 1. HIỂN THỊ NGAY BỨC ẢNH VỪA CHỤP LÊN LCD ST7789 (Độ trễ 0ms)
+    display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
+
+    // nén frame rgb565 thành jpg buffer với chất lượng 80%
     uint8_t *jpg_buf = NULL;
     size_t jpg_len = 0;
     bool converted = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
@@ -317,48 +323,58 @@ static esp_err_t camera_stop_video(void)
 
 static esp_err_t camera_record_frame(void)
 {
-    // check recording state first
+    // ktra trạng thái recording
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
-
     if(!s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_ERR_INVALID_STATE;
     }
     xSemaphoreGive(s_video_mutex);
 
-    // capture frame
+    // lấy frame rgb565
     camera_fb_t *fb = esp_camera_fb_get();
-
     if(fb == NULL){
         ESP_LOGE(TAG, "Failed to capture video frame");
         return ESP_FAIL;
     }
-    esp_err_t ret = ESP_OK;
+
+    // nén frame sang jpeg để ghi vào container avi
+    uint8_t *jpg_buf = NULL;
+    size_t jpg_len = 0;
+    bool converted = frame2jpg(fb, 90, &jpg_buf, &jpg_len);
+    
+    uint32_t width = fb->width;
+    uint32_t height = fb->height;
+    esp_camera_fb_return(fb);
+
+    if(!converted || jpg_buf == NULL){
+        ESP_LOGI(TAG, "Video frame JPEG conversion failed");
+        return ESP_FAIL;
+    }
 
     // protect video context while creating/writing frames
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
-
     if(!s_camera.recording){
         xSemaphoreGive(s_video_mutex);
-        esp_camera_fb_return(fb);
+        free(jpg_buf);
         return ESP_ERR_INVALID_STATE;
     }
    
     // first frame , create avi
     if(s_camera.video == NULL){
-        s_camera.video = storage_video_create(fb->width, fb->height, CAMERA_VIDEO_FPS);
+        s_camera.video = storage_video_create(width, height, CAMERA_VIDEO_FPS);
         if(s_camera.video == NULL){
             ESP_LOGE(TAG, "Cannot create video file");
             xSemaphoreGive(s_video_mutex);
-            esp_camera_fb_return(fb);
+            free(jpg_buf);
             return ESP_FAIL;
         }
     }
 
     // write jpeg frame into avi
-    ret = storage_video_write_frame(s_camera.video, fb->buf, fb->len);
+    esp_err_t ret = storage_video_write_frame(s_camera.video, jpg_buf, jpg_len);
     xSemaphoreGive(s_video_mutex);
-    esp_camera_fb_return(fb);
+    free(jpg_buf);
 
     if(ret != ESP_OK){
         ESP_LOGE(TAG, "cannot write video frame: %s", esp_err_to_name(ret));
@@ -407,8 +423,6 @@ static esp_err_t camera_driver_init(void)
     // sensor->set_framesize(sensor, FRAMESIZE_QVGA); // Đặt lại framesize
     // sensor->set_quality(sensor, 10);     // Chất lượng JPEG (10 - 63)
     
-    ESP_LOGI(TAG, "Camera sensor ov3660 initialized & configured");
-
     // Đợi 200ms để cảm biến nạp cấu hình và ổn định luồng ảnh
     vTaskDelay(pdMS_TO_TICKS(200));
     // Đọc thử 2 frame đầu để xả buffer
@@ -455,8 +469,7 @@ static void camera_task(void *arg)
     {
         if(events_receive(s_subscriber, &event, portMAX_DELAY) != pdTRUE) continue;
 
-        ESP_LOGI(TAG, "Receive channel=%d type=%d",
-         event.channel, event.type.raw);
+        // ESP_LOGI(TAG, "Receive channel=%d type=%d", event.channel, event.type.raw);
 
         if(event.channel != EVENT_CHANNEL_CAMERA) continue;
 
@@ -464,7 +477,7 @@ static void camera_task(void *arg)
 
         camera_handler_t handler = s_camera_handlers[event.type.camera];
 
-        ESP_LOGI(TAG, "Dispatch handler");
+        // ESP_LOGI(TAG, "Dispatch handler");
 
         if(handler == NULL) continue; 
         
