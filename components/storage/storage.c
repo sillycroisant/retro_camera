@@ -176,11 +176,7 @@ esp_err_t storage_init(void){
     }
 
     ESP_LOGI(TAG, "SD card initialized successfully!");
-
-    sdmmc_card_print_info(stdout, card);
-
     ESP_LOGI(TAG, "esp_vfs_fat_sdmmc_mount() returned: %s (0x%x)", esp_err_to_name(ret), ret);
-    
     ESP_LOGI(TAG, "SD card mounted.");
     sdmmc_card_print_info(stdout, card);
     
@@ -211,6 +207,14 @@ esp_err_t storage_init(void){
         storage_save_index();
     }
 
+    // find and return latest image filename
+    if(image_count > 0 && current_index > 1){
+        uint32_t last_idx = current_index - 1;
+        snprintf(latest_filename, sizeof(latest_filename), "photo_%06lu.jpg", (unsigned long)last_idx);
+        snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
+        ESP_LOGI(TAG, "Latest photo found: %s", latest_path);
+    }
+
     return ESP_OK;
 }
 
@@ -234,17 +238,10 @@ esp_err_t storage_save_jpeg(
         latest_filename
     );
 
-    ESP_LOGI(TAG, "Free heap: %u", (unsigned)esp_get_free_heap_size());
-
-    ESP_LOGI(TAG, "Largest block: %u",
-            (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
-
     FILE *fp = fopen(latest_path, "wb");
-
     if (fp == NULL) {
         ESP_LOGE(TAG, "Cannot create image file");
         ESP_LOGE(TAG,"errno=%d (%s)", errno, strerror(errno));
-
         return ESP_FAIL;
     }
 

@@ -25,6 +25,7 @@
 #define LCD_PIN_BK_LIGHT GPIO_NUM_42
 
 #define LCD_SPI_HOST     SPI2_HOST
+#define LCD_CHUNK_LINES  40
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 
@@ -49,7 +50,7 @@ esp_err_t display_init(void)
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * LCD_V_RES * sizeof(uint16_t),
+        .max_transfer_sz = LCD_H_RES * LCD_CHUNK_LINES * sizeof(uint16_t),
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
@@ -66,7 +67,7 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_config, &io_handle));
 
-    // 4. Khởi tạo driver ST7789
+    // 4. Khởi tạo driver ST7789 (Tương thích ESP-IDF v6.0+)
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_PIN_RST,
         .bits_per_pixel = 16,
@@ -76,12 +77,11 @@ esp_err_t display_init(void)
     // 5. Cấu hình hiển thị màn hình
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel_handle));
-    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel_handle, true));
+    ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel_handle, false));
 
     // Xoay màn hình ngang 320x240 (khớp chuẩn với ảnh QVGA của Camera)
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel_handle, false, true));
-    
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel_handle, true));
 
     // Xóa màn hình về màu đen và bật đèn nền
@@ -96,26 +96,68 @@ esp_err_t display_clear(uint16_t color)
 {
     if (s_panel_handle == NULL) return ESP_ERR_INVALID_STATE;
 
-    size_t line_pixels = LCD_H_RES;
-    uint16_t *line_buf = heap_caps_malloc(line_pixels * sizeof(uint16_t), MALLOC_CAP_DMA);
-    if (!line_buf) return ESP_ERR_NO_MEM;
-
-    for (int i = 0; i < line_pixels; i++) {
-        line_buf[i] = color;
+    static uint16_t s_line_buf[LCD_H_RES];
+    for (int i = 0; i < LCD_H_RES; i++) {
+        s_line_buf[i] = color;
     }
 
     for (int y = 0; y < LCD_V_RES; y++) {
-        esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, LCD_H_RES, y + 1, line_buf);
+        esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, LCD_H_RES, y + 1, s_line_buf);
     }
 
-    free(line_buf);
     return ESP_OK;
 }
 
 esp_err_t display_show_rgb565(const void *rgb565_buf, int x_start, int y_start, int width, int height)
 {
     if (s_panel_handle == NULL || rgb565_buf == NULL) return ESP_ERR_INVALID_ARG;
-    return esp_lcd_panel_draw_bitmap(s_panel_handle, x_start, y_start, x_start + width, y_start + height, rgb565_buf);
+
+    const uint8_t *src = (const uint8_t *)rgb565_buf;
+    size_t line_bytes = width * sizeof(uint16_t);
+
+    for (int y = 0; y < height; y += LCD_CHUNK_LINES) {
+        int lines = (y + LCD_CHUNK_LINES <= height) ? LCD_CHUNK_LINES : (height - y);
+        const uint8_t *chunk_ptr = src + (y * line_bytes);
+
+        esp_err_t ret = esp_lcd_panel_draw_bitmap(
+            s_panel_handle,
+            x_start,
+            y_start + y,
+            x_start + width,
+            y_start + y + lines,
+            chunk_ptr
+        );
+
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Draw bitmap chunk failed at line %d: %s", y, esp_err_to_name(ret));
+            return ret;
+        }
+    }
+
+    return ESP_OK;
+}
+
+// Hàm đọc kích thước ảnh gốc từ file JPEG Header
+static bool get_jpeg_resolution(const uint8_t *data, size_t len, uint16_t *width, uint16_t *height)
+{
+    if (len < 4 || data[0] != 0xFF || data[1] != 0xD8) return false;
+
+    size_t i = 2;
+    while (i < len - 8) {
+        if (data[i] != 0xFF) {
+            i++;
+            continue;
+        }
+        uint8_t marker = data[i + 1];
+        if (marker == 0xC0 || marker == 0xC1 || marker == 0xC2) { // SOF0, SOF1, SOF2
+            *height = (data[i + 5] << 8) | data[i + 6];
+            *width  = (data[i + 7] << 8) | data[i + 8];
+            return true;
+        }
+        uint16_t length = (data[i + 2] << 8) | data[i + 3];
+        i += 2 + length;
+    }
+    return false;
 }
 
 esp_err_t display_show_jpeg_file(const char *file_path)
@@ -135,23 +177,49 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     uint8_t *jpg_buf = heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (jpg_buf == NULL) {
         fclose(fp);
-        ESP_LOGE(TAG, "Cannot allocate memory for JPG");
+        ESP_LOGE(TAG, "Cannot allocate memory for JPG file (%u bytes)", (unsigned)file_size);
         return ESP_ERR_NO_MEM;
     }
 
     fread(jpg_buf, 1, file_size, fp);
     fclose(fp);
 
-    // Cấp phát buffer RGB565 trong PSRAM để giải nén (320x240x2 = 153,600 bytes)
-    size_t rgb_size = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
+    // 1. Đọc kích thước gốc của ảnh JPEG
+    uint16_t img_w = 0, img_h = 0;
+    if (!get_jpeg_resolution(jpg_buf, file_size, &img_w, &img_h)) {
+        free(jpg_buf);
+        ESP_LOGE(TAG, "Invalid JPEG format: %s", file_path);
+        return ESP_FAIL;
+    }
+
+    // 2. Tự động tính toán tỉ lệ Scale để vừa khít màn hình 320x240
+    esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
+    uint16_t out_w = img_w;
+    uint16_t out_h = img_h;
+
+    if (img_w >= 1280 || img_h >= 960) {
+        scale = JPEG_IMAGE_SCALE_1_4;
+        out_w = img_w / 4;
+        out_h = img_h / 4;
+    } else if (img_w >= 640 || img_h >= 480) {
+        scale = JPEG_IMAGE_SCALE_1_2;
+        out_w = img_w / 2;
+        out_h = img_h / 2;
+    }
+
+    ESP_LOGI(TAG, "Decoding JPEG: %s (%ux%u -> %ux%u)", file_path, img_w, img_h, out_w, out_h);
+
+    // 3. Cấp phát đúng dung lượng buffer RGB565 cần thiết (Không bao giờ tràn)
+    size_t rgb_size = (size_t)out_w * out_h * sizeof(uint16_t);
     uint8_t *rgb_buf = heap_caps_malloc(rgb_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (rgb_buf == NULL) {
         free(jpg_buf);
+        ESP_LOGE(TAG, "Cannot allocate %u bytes for RGB buffer", (unsigned)rgb_size);
         return ESP_ERR_NO_MEM;
     }
 
-    // Giải nén JPEG sang RGB565
-    bool ok = jpg2rgb565(jpg_buf, file_size, rgb_buf, JPG_SCALE_NONE);
+    // 4. Giải nén JPEG sang RGB565 an toàn
+    bool ok = jpg2rgb565(jpg_buf, file_size, rgb_buf, scale);
     free(jpg_buf);
 
     if (!ok) {
@@ -160,11 +228,18 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         return ESP_FAIL;
     }
 
-    // Vẽ toàn bộ frame lên LCD ST7789
-    esp_err_t ret = esp_lcd_panel_draw_bitmap(s_panel_handle, 0, 0, LCD_H_RES, LCD_V_RES, rgb_buf);
+    // 5. Căn giữa và vẽ lên màn hình ST7789
+    int x_start = (LCD_H_RES > out_w) ? (LCD_H_RES - out_w) / 2 : 0;
+    int y_start = (LCD_V_RES > out_h) ? (LCD_V_RES - out_h) / 2 : 0;
+    int draw_w = (out_w > LCD_H_RES) ? LCD_H_RES : out_w;
+    int draw_h = (out_h > LCD_V_RES) ? LCD_V_RES : out_h;
+
+    esp_err_t ret = display_show_rgb565(rgb_buf, x_start, y_start, draw_w, draw_h);
+    
+    // Giải phóng buffer sạch sẽ sau khi vẽ xong
     free(rgb_buf);
 
-    ESP_LOGI(TAG, "Rendered image to LCD: %s", file_path);
+    ESP_LOGI(TAG, "Rendered image to LCD successfully: %s", file_path);
     return ret;
 }
 
