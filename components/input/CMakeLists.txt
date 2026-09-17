@@ -11,4 +11,5 @@ idf_component_register(
         events
         mode
         freertos
+        esp_timer
 )

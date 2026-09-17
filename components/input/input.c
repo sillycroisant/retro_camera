@@ -4,6 +4,7 @@
 #include "driver/gpio.h"
 #include "esp_err.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -15,15 +16,15 @@
 // config
 #define TAG "Input"
 
-#define INPUT_QUEUE_SIZE        1
+#define INPUT_QUEUE_SIZE        5
 #define INPUT_TASK_STACK_SIZE   4096
 #define INPUT_TASK_PRIORITY     5
-#define INPUT_DEBOUNCE_MS       250
+#define INPUT_DEBOUNCE_MS       100000
 
-#define GPIO_BUTTON_ID_1 GPIO_NUM_1
-#define GPIO_BUTTON_ID_2 GPIO_NUM_2
-#define GPIO_BUTTON_ID_3 GPIO_NUM_3
-#define GPIO_BUTTON_ID_4 GPIO_NUM_41
+#define GPIO_BUTTON_ID_1 GPIO_NUM_0 // dùng nút boot có sẵn trên bo mạch
+#define GPIO_BUTTON_ID_2 GPIO_NUM_3 
+#define GPIO_BUTTON_ID_3 GPIO_NUM_42
+#define GPIO_BUTTON_ID_4 GPIO_NUM_46
 
 typedef enum
 {
@@ -47,48 +48,33 @@ typedef struct {
 
 static const button_gpio_map_t s_buttons[BUTTON_COUNT] =
 {
-    {
-        .gpio = GPIO_BUTTON_ID_1, .button = BUTTON_ID_1
-    },
-    {
-        .gpio = GPIO_BUTTON_ID_2, .button = BUTTON_ID_2
-    },
-    {
-        .gpio = GPIO_BUTTON_ID_3, .button = BUTTON_ID_3
-    },
-    {
-        .gpio = GPIO_BUTTON_ID_4, .button = BUTTON_ID_4
-    }
+    {   .gpio = GPIO_BUTTON_ID_1, .button = BUTTON_ID_1},
+    {   .gpio = GPIO_BUTTON_ID_2, .button = BUTTON_ID_2},
+    {   .gpio = GPIO_BUTTON_ID_3, .button = BUTTON_ID_3},
+    {   .gpio = GPIO_BUTTON_ID_4, .button = BUTTON_ID_4}
 };
-
 
 static QueueHandle_t s_button_queue = NULL;
 static TaskHandle_t s_input_task = NULL;
-static TickType_t s_last_tick[BUTTON_COUNT] = {0};
+static TickType_t s_last_isr_time[BUTTON_COUNT] = {0};
 static volatile uint32_t s_isr_count = 0;
-
-// hàm chống rung phím (button debounce)
-static bool input_debounce(button_id_t button)
-{
-    if(button >= BUTTON_COUNT) return false;
-
-    TickType_t now = xTaskGetTickCount();
-
-    if(now - s_last_tick[button] < pdMS_TO_TICKS(INPUT_DEBOUNCE_MS)) return false;
-
-    s_last_tick[button] = now;
-    return true;
-}
 
 // hàm phục vụ ngắt gpio isr (chạy trong IRAM)
 static void IRAM_ATTR input_gpio_isr(void *arg)
 {
-    const button_gpio_map_t *button = (const button_gpio_map_t *)arg;
+    const button_gpio_map_t *btn_map = (const button_gpio_map_t *)arg;
+    button_id_t btn = btn_map->button;
+    if(btn >= BUTTON_COUNT) return;
+
+    int64_t now = esp_timer_get_time();
+    if((now - s_last_isr_time[btn]) < INPUT_DEBOUNCE_MS) return;
+    s_last_isr_time[btn] = now;
     s_isr_count ++;
 
-    button_event_t event = { .button = button->button };
+    button_event_t event = { .button = btn };
     BaseType_t hp_task_woken = pdFALSE;
 
+    // only send 1 event into queue over 150ms period
     xQueueSendFromISR(s_button_queue, &event, &hp_task_woken);
 
     if (hp_task_woken){
@@ -175,23 +161,19 @@ static void input_task(void *arg)
     button_event_t button_event;
     event_t event;
 
-    ESP_LOGI(TAG, "Input task started successfully");
-    ESP_LOGI(TAG, "ISR count=%lu", (unsigned long)s_isr_count);
+    ESP_LOGI(TAG, "Input task started successfully (Queue size:%d)", INPUT_QUEUE_SIZE);
 
     while(1)
     {
-        // chờ tín hiệu ngắt từ isr
+        // 1. chờ tín hiệu ngắt từ isr
         if(xQueueReceive(s_button_queue, &button_event, portMAX_DELAY) != pdTRUE) continue;
 
-        // debounce các tín hiệu ngắt
-        if(!input_debounce(button_event.button)) continue;
-
-        // ánh xạ chức năng nút bấm theo mode
+        button_id_t btn = button_event.button;
+        if(btn >= BUTTON_COUNT) continue;
+    
+        // 2. ánh xạ chức năng nút bấm theo mode
         if(!input_translate(button_event.button, &event)) continue;
-        
-        // ESP_LOGI(TAG, "Publish channel=%d type=%d", event.channel, event.type.raw);
         esp_err_t ret = events_publish(&event);
-
         if(ret != ESP_OK) ESP_LOGW(TAG, "Failed to publish event (%s)", esp_err_to_name(ret));
     }
 }
@@ -201,14 +183,16 @@ esp_err_t input_init(void)
 {
     if (s_button_queue != NULL) return ESP_OK;
 
-    // tạo hàng đợi nhận event từ isr
     s_button_queue = xQueueCreate(INPUT_QUEUE_SIZE, sizeof(button_event_t));
-    if (s_button_queue == NULL) return ESP_ERR_NO_MEM;
+    if (s_button_queue == NULL){
+        ESP_LOGE(TAG, "Failed to create button queue");
+        return ESP_ERR_NO_MEM;
+    }
 
     // khởi tại isr interrupt gpio
     esp_err_t err = gpio_install_isr_service(0);
     if(err != ESP_OK && err != ESP_ERR_INVALID_STATE){
-        ESP_LOGE(TAG, "failed to initialized gpio service: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Failed to initialized gpio service: %s", esp_err_to_name(err));
         return err;
     }
 
@@ -218,14 +202,14 @@ esp_err_t input_init(void)
         .mode = GPIO_MODE_INPUT,
         .pull_up_en = GPIO_PULLUP_ENABLE,
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_POSEDGE
+        .intr_type = GPIO_INTR_NEGEDGE
     };
 
     for (int i = 0; i < BUTTON_COUNT; i++)
     {
         gpio_num_t pin = s_buttons[i].gpio;
+        gpio_reset_pin(pin);
         io.pin_bit_mask = 1ULL << pin;
-
         ESP_ERROR_CHECK(gpio_config(&io));
 
         esp_err_t err = gpio_isr_handler_add(pin, input_gpio_isr, (void*)&s_buttons[i]);
@@ -237,7 +221,7 @@ esp_err_t input_init(void)
         ESP_LOGI(TAG, "Button %d (GPIO %d) configured", i+1, pin);
     }
 
-    ESP_LOGI(TAG, "All %d buttons initialized with interrupted!", BUTTON_COUNT);
+    ESP_LOGI(TAG, "All %d buttons initialized (Debounce: %d ms, Queue: %d)", BUTTON_COUNT, INPUT_DEBOUNCE_MS / 1000, INPUT_QUEUE_SIZE);
     return ESP_OK;
 }
 
@@ -246,11 +230,9 @@ esp_err_t input_start(void)
     if(s_input_task != NULL) return ESP_OK;
 
     BaseType_t ret = xTaskCreate(
-        input_task,
-        "input_task",
+        input_task, "input_task",
         INPUT_TASK_STACK_SIZE,
-        NULL,
-        INPUT_TASK_PRIORITY,
+        NULL, INPUT_TASK_PRIORITY,
         &s_input_task
     );
 
@@ -260,6 +242,5 @@ esp_err_t input_start(void)
     }
     
     ESP_LOGI(TAG, "Input task created");
-
     return ESP_OK;
 }
