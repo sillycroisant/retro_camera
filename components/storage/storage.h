@@ -90,6 +90,10 @@ esp_err_t storage_video_close(storage_video_t *video);
 
 esp_err_t storage_video_abort(storage_video_t *video);
 
+uint32_t storage_get_current_index(void);
+
+esp_err_t storage_get_path_by_index(uint32_t index, char *out_path, size_t max_len);
+
 #ifdef __cplustplus
 }
 #endif

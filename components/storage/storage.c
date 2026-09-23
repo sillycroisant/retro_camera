@@ -776,3 +776,20 @@ esp_err_t storage_video_abort(storage_video_t *video)
 
     return ESP_OK;
 }
+
+uint32_t storage_get_current_index(void){
+    return (current_index > 1) ? (current_index - 1) : 0;
+}
+
+esp_err_t storage_get_path_by_index(uint32_t index, char *out_path, size_t max_len){
+    if(out_path == NULL || max_len == 0 || index == 0){
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    snprintf(out_path, max_len, "%s/photo_%06lu.jpg", PHOTO_DIRECTORY, (unsigned long)index);
+    struct stat st;
+    if(stat(out_path, &st) == 0){
+        return ESP_OK;
+    }
+    return ESP_ERR_NOT_FOUND;
+}

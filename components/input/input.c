@@ -131,13 +131,13 @@ static bool input_translate(button_id_t button, event_t *event)
                     break;
 
                 case BUTTON_ID_2:
-                    event->type.gallery = GALLERY_EVENT_SCROLL_UP;
-                    ESP_LOGI(TAG, "[Btn 2 - GPIO 2] Event: SCROLL UP");
+                    event->type.gallery = GALLERY_EVENT_SCROLL_FORWARD;
+                    ESP_LOGI(TAG, "[Btn 2 - GPIO 2] Event: SCROLL FORWARD");
                     break;
 
                 case BUTTON_ID_3:
-                    event->type.gallery = GALLERY_EVENT_SCROLL_DOWN;
-                    ESP_LOGI(TAG, "[Btn 3 - GPIO 3] Event: SCROLL DOWN");
+                    event->type.gallery = GALLERY_EVENT_SCROLL_BACK;
+                    ESP_LOGI(TAG, "[Btn 3 - GPIO 3] Event: SCROLL BACK");
                     break;
                     
                 case BUTTON_ID_4:
@@ -229,11 +229,11 @@ esp_err_t input_start(void)
 {
     if(s_input_task != NULL) return ESP_OK;
 
-    BaseType_t ret = xTaskCreate(
+    BaseType_t ret = xTaskCreatePinnedToCore(
         input_task, "input_task",
         INPUT_TASK_STACK_SIZE,
         NULL, INPUT_TASK_PRIORITY,
-        &s_input_task
+        &s_input_task, 0
     );
 
     if (ret != pdPASS) {
@@ -241,6 +241,6 @@ esp_err_t input_start(void)
         return ESP_FAIL;
     }
     
-    ESP_LOGI(TAG, "Input task created");
+    ESP_LOGI(TAG, "Input task pinned to core 0");
     return ESP_OK;
 }

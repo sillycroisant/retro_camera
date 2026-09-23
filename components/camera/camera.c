@@ -11,6 +11,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
 #include "freertos/semphr.h"
 
 #include "events.h"
@@ -28,12 +29,15 @@
 #define CAMERA_TASK_PRIORITY        6
 
 #define LIVEVIEW_TASK_STACK_SIZE    4096
-#define LIVEVIEW_TASK_PRIORITY      4
+#define LIVEVIEW_TASK_PRIORITY      5
+
+#define SAVE_TASK_STACK_SIZE        4096
+#define SAVE_TASK_PRIORITY          4
 
 #define CAMERA_EVENT_QUEUE_LENGTH   5
 #define CAMERA_FLASH_GPIO           4
 
-#define CAMERA_FLASH_DELAY_MS       100
+#define CAMERA_FLASH_DELAY_MS       80
 #define VIDEO_DIRECTORY             "/sdcard/videos"
 #define CAMERA_VIDEO_FPS            10
 
@@ -42,12 +46,9 @@ typedef struct
 {
     bool flash_enabled;
     camera_capture_mode_t capture_mode;
-
     bool recording;
     bool capturing;
-
     storage_video_t *video;
-
 } camera_state_t;
 
 typedef void (*camera_handler_t)(void);
@@ -65,7 +66,9 @@ static camera_state_t s_camera =
 static TaskHandle_t s_camera_task = NULL;
 static TaskHandle_t s_video_task = NULL;
 static TaskHandle_t s_liveview_task = NULL;
+static TaskHandle_t s_save_task = NULL;
 
+static QueueHandle_t s_save_queue = NULL;
 static SemaphoreHandle_t s_video_mutex = NULL;
 static event_subscriber_t *s_subscriber = NULL;
 
@@ -109,6 +112,7 @@ static camera_config_t s_camera_config =
 static void camera_task(void *arg);
 static void video_task(void *arg);
 static void liveview_task(void *arg);
+static void photo_save_task(void *arg);
 
 // event handlers for each buttons' input
 static void camera_handle_capture(void);
@@ -123,7 +127,6 @@ static void camera_capture_photo(void);
 static void camera_capture_video(void);
 static esp_err_t camera_start_video(void);
 static esp_err_t camera_stop_video(void);
-static esp_err_t camera_save_photo(camera_fb_t *fb);
 static esp_err_t camera_record_frame(void);
 static bool camera_is_recording(void);
 
@@ -204,9 +207,10 @@ static void camera_handle_open_gallery(void)
     display_show_latest_photo();
 }
 
+// capture image using core 1..
 static void camera_capture_photo(void)
 {
-    ESP_LOGI(TAG,"Capturing photo... (RGB565 -> JPG) ...");
+    ESP_LOGI(TAG,"[Core 1] Capturing snapshot...");
     s_camera.capturing = true; // flag bận để live view task tạm dừng 1 nhịp
 
     if(s_camera.flash_enabled){
@@ -216,41 +220,60 @@ static void camera_capture_photo(void)
 
     camera_fb_t *fb = esp_camera_fb_get();
 
-    gpio_set_level(CAMERA_FLASH_GPIO, 0);
+    if(s_camera.flash_enabled){
+        gpio_set_level(CAMERA_FLASH_GPIO, 0);
+    }
 
     if(fb == NULL)
     {
-        ESP_LOGE(TAG, "Camera capture failed."); return ;
+        ESP_LOGE(TAG, "Camera capture failed."); 
+        s_camera.capturing = false;
+        return;
     }
 
     // 1. HIỂN THỊ NGAY BỨC ẢNH VỪA CHỤP LÊN LCD ST7789
     display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
 
-    // nén frame rgb565 thành jpg buffer với chất lượng 80%
-    uint8_t *jpg_buf = NULL;
-    size_t jpg_len = 0;
-    bool converted = frame2jpg(fb, 80, &jpg_buf, &jpg_len);
-
-    esp_camera_fb_return(fb);
-    
-    if(!converted || jpg_buf == NULL){
-        ESP_LOGE(TAG, "JPEG compression failed");
-        return ;
+    // đẩy frame buffer sang queue để core 0 nén jpeg và ghi thẻ nhớ ngầm
+    if(xQueueSend(s_save_queue, &fb, 0) != pdPASS) {
+        ESP_LOGW(TAG, "Save queue full, dropping snapshot");
+        esp_camera_fb_return(fb);
     }
-    
-    ESP_LOGI(TAG, "Compressed to JPEG: %u bytes", (unsigned)jpg_len);
-
-    esp_err_t ret = storage_save_jpeg(jpg_buf, jpg_len);
-    free(jpg_buf);
-
-    if (ret != ESP_OK){
-        ESP_LOGE(TAG, "Cannot save photo to sdcard");
-    } else {
-        ESP_LOGI(TAG, "Photo saved successfully");
-    }
-
+    // keep the captured img for a short duration
+    vTaskDelay(pdMS_TO_TICKS(80));
     s_camera.capturing = false;
-} 
+}
+
+static void photo_save_task(void *arg){
+    camera_fb_t *fb = NULL;
+    ESP_LOGI(TAG, "Photo background saver task running on core 0");
+
+    while(true){
+        if(xQueueReceive(s_save_queue, &fb, portMAX_DELAY) != pdTRUE || fb == NULL) continue;
+
+        ESP_LOGI(TAG, "[Core 0] Background JPEG compressing & SD writing...");
+        uint8_t *jpg_buf = NULL;
+        size_t jpg_len = 0;
+        bool converted = frame2jpg(fb, 85, &jpg_buf, &jpg_len);
+
+        esp_camera_fb_return(fb);
+
+        if(!converted || jpg_buf == NULL){
+            ESP_LOGE(TAG, "Background JPEG compression failed"); continue;
+        }
+
+        // writing into sdcard
+        esp_err_t ret = storage_save_jpeg(jpg_buf, jpg_len);
+        free(jpg_buf);
+
+        if(ret != ESP_OK){
+    gpio_set_level(CAMERA_FLASH_GPIO, 0);
+            ESP_LOGE(TAG, "Failed to save photo to SD card");
+        } else {
+            ESP_LOGI(TAG, "[Core 0] Photo saved to SD card successfully");
+        }
+    }
+}
 
 // RECORD VIDEO
 static bool camera_is_recording(void)
@@ -262,21 +285,19 @@ static bool camera_is_recording(void)
     return recording;
 }
 
-static esp_err_t camera_start_video(void){
+static esp_err_t camera_start_video(void)
+{
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
-
    if(s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_OK;
    }
-
    s_camera.recording = true;
    s_camera.video = NULL;
    xSemaphoreGive(s_video_mutex);
     
    ESP_LOGI(TAG, "Video recording started");
     return ESP_OK;
-
 }
 
 static esp_err_t camera_stop_video(void)
@@ -448,35 +469,32 @@ static esp_err_t camera_flash_init(void)
     };
 
     ESP_ERROR_CHECK(gpio_config(&io));
-    // default flash led turn off, but MODE ON
     gpio_set_level(CAMERA_FLASH_GPIO, 0);
     s_camera.flash_enabled = false;
     ESP_LOGI(TAG, "Flash initialized, mode OFF");
     return ESP_OK;
 }
 
-// camera task
+// camera task (run on core 1)
 static void camera_task(void *arg)
 {
     event_t event;
-    ESP_LOGI(TAG, "Camera tasks started");
+    ESP_LOGI(TAG, "Camera tasks started on Core 1");
 
     while(true)
     {
         if(events_receive(s_subscriber, &event, portMAX_DELAY) != pdTRUE) continue;
-        // ESP_LOGI(TAG, "Receive channel=%d type=%d", event.channel, event.type.raw);
         if(event.channel != EVENT_CHANNEL_CAMERA) continue;
         if(event.type.camera >= CAMERA_EVENT_COUNT) continue;
+
         camera_handler_t handler = s_camera_handlers[event.type.camera];
-        // ESP_LOGI(TAG, "Dispatch handler");
-        if(handler == NULL) continue; 
-        handler();
+        if(handler != NULL) handler();
     }
 }
 
-// liveview task
+// liveview task (run on core 1)
 static void liveview_task(void *arg){
-    ESP_LOGI(TAG, "Real-time Liveview task started");
+    ESP_LOGI(TAG, "Real-time Liveview task started on Core 1");
 
     while(true){
         // ktra mode hiện tại, nếu gallery hoặc chụp/ghi -> tạm dừng live
@@ -489,21 +507,19 @@ static void liveview_task(void *arg){
         // lấy frame từ camera
         camera_fb_t *fb = esp_camera_fb_get();
         if(fb != NULL){
-            // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh
-            // cẩn thận bị tràn khung ảnh -> core panic
+            // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh // cẩn thận bị tràn khung ảnh -> core panic
             display_show_rgb565(fb->buf, 0,0, fb->width, fb->height);
             esp_camera_fb_return(fb);
         }
 
-        // delay để giữ fps ổn định và nhường cho cpu
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(20)); // delay để giữ fps ổn định và nhường cho cpu
     }
 }
 
-// video task
+// video task (run on core 0)
 static void video_task(void *arg)
 {
-    ESP_LOGI(TAG, "Video task started");
+    ESP_LOGI(TAG, "Video task started on Core 0");
     const TickType_t frame_period = pdMS_TO_TICKS(1000 / CAMERA_VIDEO_FPS);
     bool was_recording = false;
     TickType_t last_wake_time = xTaskGetTickCount();
@@ -526,7 +542,7 @@ static void video_task(void *arg)
 
         // not recording
         if(!recording){
-            vTaskDelay(pdMS_TO_TICKS(10)); continue;
+            vTaskDelay(pdMS_TO_TICKS(20)); continue;
         }
 
         esp_err_t ret = camera_record_frame();
@@ -550,51 +566,70 @@ esp_err_t camera_init(void)
         ESP_LOGE(TAG, "Cannot create video mutex");
         return ESP_ERR_NO_MEM;
     }
+    
+    s_save_queue = xQueueCreate(2, sizeof(camera_fb_t *));
+    if(s_save_queue == NULL){
+        ESP_LOGE(TAG, "Cannot create save queue");
+        return ESP_ERR_NO_MEM;
+    }
 
     s_subscriber = events_subscribe(EVENT_MASK_CAMERA, CAMERA_EVENT_QUEUE_LENGTH);
     if(s_subscriber == NULL) return ESP_FAIL;
 
-    ESP_LOGI(TAG, "Camera initialized driver and flash.");
+    ESP_LOGI(TAG, "Camera initialized driver and flash successfully.");
     return ESP_OK;
 }
 
 esp_err_t camera_start(void)
 {
+    // Core 1
     if(s_camera_task == NULL){
-        BaseType_t ret = xTaskCreate(camera_task, 
-                        "camera task", CAMERA_TASK_STACK_SIZE,
-                        NULL, CAMERA_TASK_PRIORITY, &s_camera_task);
+        BaseType_t ret = xTaskCreatePinnedToCore(camera_task, 
+                        "camera task", CAMERA_TASK_STACK_SIZE, NULL, 
+                        CAMERA_TASK_PRIORITY, &s_camera_task, 1);
 
-        if(ret != pdPASS){
-            ESP_LOGE(TAG, "Cannot create camera task");
+        if(ret != pdPASS) {
+            ESP_LOGE(TAG, "Cannot create camera task"); 
             return ESP_FAIL;
         }
-
         ESP_LOGI(TAG, "Camera task created");
     }
 
     if(s_video_task == NULL){
-        BaseType_t ret = xTaskCreate(video_task,
-                            "video task", CAMERA_TASK_STACK_SIZE,
-                            NULL, CAMERA_TASK_PRIORITY, &s_video_task);
+        BaseType_t ret = xTaskCreatePinnedToCore(video_task,
+                            "video task", CAMERA_TASK_STACK_SIZE, NULL, 
+                            CAMERA_TASK_PRIORITY, &s_video_task, 1);
 
-        if(ret != pdPASS){
-            ESP_LOGE(TAG, "Cannot create video task");
+        if(ret != pdPASS) {
+            ESP_LOGE(TAG, "Cannot create video task"); 
             return ESP_FAIL;
         }
         ESP_LOGI(TAG, "Video task created");
     }
 
+    // Core 0
     if(s_liveview_task == NULL){
-        BaseType_t ret = xTaskCreate(liveview_task,
-                            "liveview task", LIVEVIEW_TASK_STACK_SIZE,
-                            NULL, LIVEVIEW_TASK_PRIORITY, &s_liveview_task);
-        if(ret != pdPASS){
-            ESP_LOGE(TAG,"Cannot create liveview task");
+        BaseType_t ret = xTaskCreatePinnedToCore(liveview_task,
+                            "liveview task", LIVEVIEW_TASK_STACK_SIZE, NULL,
+                            LIVEVIEW_TASK_PRIORITY, &s_liveview_task, 0);
+        if(ret != pdPASS) {
+            ESP_LOGE(TAG,"Cannot create liveview task"); 
             return ESP_FAIL;
         }
         ESP_LOGI(TAG, "Liveview task created");
     }
 
+    if(s_save_task == NULL){
+        BaseType_t ret = xTaskCreatePinnedToCore(photo_save_task, 
+                            "save photo task", SAVE_TASK_STACK_SIZE, NULL, 
+                            SAVE_TASK_PRIORITY, &s_save_task, 0);
+
+        if(ret != pdPASS) {
+            ESP_LOGE(TAG, "Cannot create save task"); 
+            return ESP_FAIL;
+        }
+    }
+
+    ESP_LOGI(TAG, "Camera tasks pinned to core 0 and 1 successfully.");
     return ESP_OK;
 }
