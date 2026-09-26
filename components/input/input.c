@@ -19,12 +19,12 @@
 #define INPUT_QUEUE_SIZE        5
 #define INPUT_TASK_STACK_SIZE   4096
 #define INPUT_TASK_PRIORITY     5
-#define INPUT_DEBOUNCE_MS       100000
+#define INPUT_DEBOUNCE_MS       200000
 
 #define GPIO_BUTTON_ID_1 GPIO_NUM_0 // dùng nút boot có sẵn trên bo mạch
 #define GPIO_BUTTON_ID_2 GPIO_NUM_3 
 #define GPIO_BUTTON_ID_3 GPIO_NUM_42
-#define GPIO_BUTTON_ID_4 GPIO_NUM_46
+#define GPIO_BUTTON_ID_4 GPIO_NUM_41
 
 typedef enum
 {
@@ -56,7 +56,7 @@ static const button_gpio_map_t s_buttons[BUTTON_COUNT] =
 
 static QueueHandle_t s_button_queue = NULL;
 static TaskHandle_t s_input_task = NULL;
-static TickType_t s_last_isr_time[BUTTON_COUNT] = {0};
+static int64_t s_last_isr_time[BUTTON_COUNT] = {0};
 static volatile uint32_t s_isr_count = 0;
 
 // hàm phục vụ ngắt gpio isr (chạy trong IRAM)

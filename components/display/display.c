@@ -9,10 +9,12 @@
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_panel_vendor.h"
-#include "esp_lcd_panel_ops.h"
+#include "esp_lcd_panel_ops.h"  
 
 #include "img_converters.h"
 #include "storage.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define TAG "Display"
 
@@ -28,6 +30,7 @@
 #define LCD_CHUNK_LINES  40
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
+static SemaphoreHandle_t s_display_mutex = NULL;
 
 esp_err_t display_init(void)
 {
@@ -88,6 +91,11 @@ esp_err_t display_init(void)
     display_clear(0x0000);
     gpio_set_level(LCD_PIN_BK_LIGHT, 1);
 
+    // create mutex to protect display SPI
+    if (s_display_mutex == NULL) {
+        s_display_mutex = xSemaphoreCreateMutex();
+    }
+
     ESP_LOGI(TAG, "ST7789 LCD Display initialized (320x240)");
     return ESP_OK;
 }
@@ -95,25 +103,20 @@ esp_err_t display_init(void)
 esp_err_t display_clear(uint16_t color)
 {
     if (s_panel_handle == NULL) return ESP_ERR_INVALID_STATE;
-
     static uint16_t s_line_buf[LCD_H_RES];
-    for (int i = 0; i < LCD_H_RES; i++) {
-        s_line_buf[i] = color;
-    }
-
-    for (int y = 0; y < LCD_V_RES; y++) {
-        esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, LCD_H_RES, y + 1, s_line_buf);
-    }
-
+    for (int i = 0; i < LCD_H_RES; i++) s_line_buf[i] = color;
+    for (int y = 0; y < LCD_V_RES; y++) esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, LCD_H_RES, y + 1, s_line_buf);
     return ESP_OK;
 }
+
 
 esp_err_t display_show_rgb565(const void *rgb565_buf, int x_start, int y_start, int width, int height)
 {
     if (s_panel_handle == NULL || rgb565_buf == NULL) return ESP_ERR_INVALID_ARG;
-
+    if(s_display_mutex) xSemaphoreTake(s_display_mutex, portMAX_DELAY);
     const uint8_t *src = (const uint8_t *)rgb565_buf;
     size_t line_bytes = width * sizeof(uint16_t);
+    esp_err_t ret = ESP_OK;
 
     for (int y = 0; y < height; y += LCD_CHUNK_LINES) {
         int lines = (y + LCD_CHUNK_LINES <= height) ? LCD_CHUNK_LINES : (height - y);
@@ -130,12 +133,14 @@ esp_err_t display_show_rgb565(const void *rgb565_buf, int x_start, int y_start, 
 
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Draw bitmap chunk failed at line %d: %s", y, esp_err_to_name(ret));
-            return ret;
+            break;
         }
     }
 
-    return ESP_OK;
+    if(s_display_mutex) xSemaphoreGive(s_display_mutex);
+    return ret;
 }
+
 
 // Hàm đọc kích thước ảnh gốc từ file JPEG Header
 static bool get_jpeg_resolution(const uint8_t *data, size_t len, uint16_t *width, uint16_t *height)
@@ -159,6 +164,7 @@ static bool get_jpeg_resolution(const uint8_t *data, size_t len, uint16_t *width
     }
     return false;
 }
+
 
 esp_err_t display_show_jpeg_file(const char *file_path)
 {
@@ -238,10 +244,10 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     
     // Giải phóng buffer sạch sẽ sau khi vẽ xong
     free(rgb_buf);
-
     ESP_LOGI(TAG, "Rendered image to LCD successfully: %s", file_path);
     return ret;
 }
+
 
 esp_err_t display_show_latest_photo(void)
 {

@@ -15,10 +15,11 @@
 #include "freertos/semphr.h"
 
 #include "events.h"
-#include "mode.h"
 #include "storage.h"
+#include "mode.h"
 #include "driver/gpio.h"
 #include "display.h"
+#include "gallery.h"
 
 #include "camera_pinout.h"
 
@@ -203,9 +204,7 @@ static void camera_handle_open_gallery(void)
 {
     ESP_LOGI(TAG,"Switch to Gallery mode");
     mode_set(APP_MODE_GALLERY);
-    // tự động load và hiển thị ảnh gần đây nhất lên màn hình
-    display_show_latest_photo();
-}
+    gallery_display_current_photo();}
 
 // capture image using core 1..
 static void camera_capture_photo(void)

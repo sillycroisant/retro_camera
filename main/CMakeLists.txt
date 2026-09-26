@@ -6,9 +6,6 @@ idf_component_register(
     REQUIRES
         camera
         storage
-        webserver
-        network
-        frontend
         events
         input
         mode

@@ -9,4 +9,5 @@ idf_component_register(
         freertos
         storage
         esp32-camera
+        mode
 )

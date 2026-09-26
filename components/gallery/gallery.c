@@ -22,11 +22,12 @@ static event_subscriber_t *s_subscriber = NULL;
 static uint32_t s_current_photo_idx = 0;
 
 // display current photo in gallery
-static void gallery_display_current_photo(void)
+void gallery_display_current_photo(void)
 {
-    if(s_current_photo_idx == 0){
-        s_current_photo_idx = storage_get_current_index();
-    }
+    if(mode_get() != APP_MODE_GALLERY) return;
+
+    if(s_current_photo_idx == 0) s_current_photo_idx = storage_get_current_index();
+
 
     if(s_current_photo_idx == 0){
         ESP_LOGI(TAG, "No photos found on SD card");
@@ -34,11 +35,11 @@ static void gallery_display_current_photo(void)
     }
 
     char path[128];
-        if(storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) == ESP_OK){
-        ESP_LOGI(TAG, "Gallert viewing [%lu]: %s", (unsigned long)s_current_photo_idx, path);
+    if(storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) == ESP_OK){
+        ESP_LOGI(TAG, "Gallery viewing [%lu]: %s", (unsigned long)s_current_photo_idx, path);
         display_show_jpeg_file(path);
     } else {
-        ESP_LOGW(TAG, "Photp index %lu not found", (unsigned long)s_current_photo_idx);
+        ESP_LOGW(TAG, "Photo index %lu not found", (unsigned long)s_current_photo_idx);
     }
 }
 
@@ -159,10 +160,4 @@ esp_err_t gallery_start(void)
 
     ESP_LOGI(TAG, "Gallery task created");
     return ESP_OK;
-}
-
-void gallery_show_current(void){
-    ESP_LOGI(TAG, "Gallery: Loading latest photo onto screen...");
-    // thuc ra ham nay hoi du thua, co the xoa / optimize qua ben display sau
-    display_show_latest_photo();
 }
