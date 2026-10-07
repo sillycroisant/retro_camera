@@ -142,6 +142,57 @@ static void storage_save_index(void)
     fclose(fp);
 }
 
+esp_err_t storage_rescan(void){
+    DIR *dir = opendir(PHOTO_DIRECTORY);
+    if(dir == NULL){
+        ESP_LOGI(TAG, "Cannot open photos directory for rescan");
+        current_index = 1;
+        image_count = 0;
+        latest_path[0] = '\0';
+        latest_filename[0] = '\0';
+        storage_save_index();
+        return ESP_FAIL;
+    }
+
+    struct dirent *entry;
+    uint32_t max_index = 0;
+    uint32_t count = 0;
+
+    while((entry = readdir(dir)) != NULL){
+        uint32_t index = 0;
+        if(sscanf(entry->d_name, "photo_%lu.jpg", &index) == 1) {
+            count ++;\
+            if(index > max_index) {
+                max_index = index;
+            }
+        }
+    }
+    closedir(dir);
+    image_count = count;
+    current_index = max_index + 1;
+    if(max_index > 0){
+        snprintf(latest_filename, sizeof(latest_filename), "photo_%06lu.jpg", (unsigned long)max_index);
+        snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
+        
+        // Kiểm tra xem file có tồn tại theo định dạng 6 chữ số không, nếu không thử định dạng cũ
+        struct stat st;
+        if (stat(latest_path, &st) != 0) {
+            snprintf(latest_filename, sizeof(latest_filename), "photo_%lu.jpg", (unsigned long)max_index);
+            snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
+        }
+    } else {
+        latest_path[0] = '\0';
+        latest_filename[0] = '\0';
+    }
+    ESP_LOGI(TAG, "Rescan completed: %lu photos found, next index: %lu", 
+             (unsigned long)image_count, (unsigned long)current_index);
+
+    storage_save_index();
+    return ESP_OK;
+
+
+    
+}
 
 esp_err_t storage_init(void){
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
@@ -190,21 +241,31 @@ esp_err_t storage_init(void){
     }
 
     //
+    bool need_rescan = false;
     if (storage_load_index()){
         current_index = g_index.next_index;
         image_count = g_index.image_count;
-
-        ESP_LOGI(TAG, "Index loaded (%lu)", (unsigned long)current_index);
+        // confirm latest image really store in sdcard or not
+        if(image_count > 0 && current_index > 1){
+            uint32_t last_idx = current_index -1;
+            char check_path[128];
+            if(storage_get_path_by_index(last_idx, check_path, sizeof(check_path)) == ESP_OK){
+                strncpy(latest_path, check_path, sizeof(latest_path));
+                const char *p = strrchr(check_path, '/');
+                if(p) strncpy(latest_filename, p+1,sizeof(latest_filename));
+                ESP_LOGI(TAG, "Index verified from index.dat (%lu photos)",(unsigned long)image_count);
+            } else {
+                ESP_LOGW(TAG, "index.bat out of sync with SD files, auto re-scanning...");
+                need_rescan = true;
+            }
+        }
     } else {
+        ESP_LOGW(TAG, "index.dat file missing or invalid, scanning SD card ...");
+        need_rescan = true;
+    }
 
-        ESP_LOGW(TAG, "index.dat file missing");
-
-        storage_scan_directory();
-        
-        g_index.next_index = current_index;
-        g_index.image_count = image_count;
-
-        storage_save_index();
+    if(need_rescan){
+        storage_rescan();
     }
 
     // find and return latest image filename
@@ -260,6 +321,31 @@ esp_err_t storage_save_jpeg(
     return ESP_OK;
 }
 
+
+esp_err_t storage_delete_photo(uint32_t index){
+    if(index == 0) return ESP_ERR_INVALID_ARG;
+
+    char file_path[128];
+    if(storage_get_path_by_index(index, file_path, sizeof(file_path)) != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot delete photo %lu: File not found", (long unsigned)index);
+        return ESP_ERR_NOT_FOUND;
+    }
+    
+    if(remove(file_path) == 0){
+        ESP_LOGI(TAG, "Deleted photo: %s", file_path);
+        if(image_count > 0) image_count --;
+        // if deleted latest image, rescan to find the next latest image
+        if(index == current_index - 1){
+            storage_rescan();
+        } else{
+            storage_save_index();
+        }
+        return ESP_OK;
+    } else {
+        ESP_LOGE(TAG, "Failed to remove %s (errno=%d)", file_path, errno);
+        return ESP_FAIL;
+    }
+}
 
 const char *storage_latest_path(void){
     return latest_path;
@@ -792,4 +878,14 @@ esp_err_t storage_get_path_by_index(uint32_t index, char *out_path, size_t max_l
         return ESP_OK;
     }
     return ESP_ERR_NOT_FOUND;
+}
+
+uint32_t storage_get_remaining_photos(void){
+    uint64_t total_bytes = 0;
+    uint64_t free_bytes = 0;
+
+    if(esp_vfs_fat_info(STORAGE_ROOT, &total_bytes, &free_bytes) != ESP_OK || free_bytes == 0) return 0;
+
+    // each QVGA jpeg estimate around 30kb
+    return (uint32_t)free_bytes / (30 * 1024);
 }

@@ -3,6 +3,7 @@
 #include "esp_err.h"
 #include <stdint.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -10,6 +11,22 @@ extern "C" {
 
 #define LCD_H_RES 320
 #define LCD_V_RES 240
+#define COLOR_BLACK 0x0000
+#define COLOR_WHITE 0xFFFF
+
+// OSD functions
+void display_draw_pixel(uint16_t *buf, int buf_w, int buf_h, int x, int y, uint16_t color);
+
+// void display_draw_char(uint16_t *buf, int buf_w, int buf_h, int x, int y, char c, uint16_t color, uint16_t bg, bool transparent);
+
+void display_draw_string(uint16_t *buf, int buf_w, int buf_h, int x, int y, const char *str, uint16_t color, bool shadow);
+
+void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h, int img_w, int img_h, 
+                                bool is_video_mode, bool is_recording, uint32_t record_sec, 
+                                int fps, bool flash_on, uint32_t remaining_photos);
+
+void display_draw_osd_gallery(uint16_t *buf, int buf_w, int buf_h, int img_w, int img_h,
+                                uint32_t current_idx, uint32_t total_count);
 
 /**
  * @brief Khởi tạo màn hình LCD ST7789 qua SPI DMA và bật đèn nền

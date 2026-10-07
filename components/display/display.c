@@ -1,5 +1,5 @@
 #include "display.h"
-
+#include "font8x8.h"
 #include <stdio.h>
 #include <string.h>
 #include "esp_log.h"
@@ -18,13 +18,15 @@
 
 #define TAG "Display"
 
-// Cấu hình chân GPIO đã đề xuất
+// Cấu hình chân GPIO
+// GND
+// VCC
 #define LCD_PIN_SCLK     GPIO_NUM_14
 #define LCD_PIN_MOSI     GPIO_NUM_21
 #define LCD_PIN_CS       GPIO_NUM_45
 #define LCD_PIN_DC       GPIO_NUM_48
 #define LCD_PIN_RST      GPIO_NUM_47
-#define LCD_PIN_BK_LIGHT GPIO_NUM_42
+#define LCD_PIN_BK_LIGHT -1            // chân BK light mặc định 3v3
 
 #define LCD_SPI_HOST     SPI2_HOST
 #define LCD_CHUNK_LINES  40
@@ -38,15 +40,7 @@ esp_err_t display_init(void)
 
     ESP_LOGI(TAG, "Initializing ST7789 LCD Display...");
 
-    // 1. Cấu hình chân đèn nền (Backlight)
-    gpio_config_t bk_gpio_config = {
-        .mode = GPIO_MODE_OUTPUT,
-        .pin_bit_mask = 1ULL << LCD_PIN_BK_LIGHT
-    };
-    gpio_config(&bk_gpio_config);
-    gpio_set_level(LCD_PIN_BK_LIGHT, 0); // Tắt đèn nền tạm thời lúc khởi tạo
-
-    // 2. Khởi tạo SPI Bus
+    // 1. Khởi tạo SPI Bus
     spi_bus_config_t buscfg = {
         .sclk_io_num = LCD_PIN_SCLK,
         .mosi_io_num = LCD_PIN_MOSI,
@@ -57,7 +51,7 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
-    // 3. Cấu hình Panel IO SPI
+    // 2. Cấu hình Panel IO SPI
     esp_lcd_panel_io_handle_t io_handle = NULL;
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = LCD_PIN_DC,
@@ -70,14 +64,14 @@ esp_err_t display_init(void)
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_io_spi((esp_lcd_spi_bus_handle_t)LCD_SPI_HOST, &io_config, &io_handle));
 
-    // 4. Khởi tạo driver ST7789 (Tương thích ESP-IDF v6.0+)
+    // 3. Khởi tạo driver ST7789 (Tương thích ESP-IDF v6.0+)
     esp_lcd_panel_dev_config_t panel_config = {
         .reset_gpio_num = LCD_PIN_RST,
         .bits_per_pixel = 16,
     };
     ESP_ERROR_CHECK(esp_lcd_new_panel_st7789(io_handle, &panel_config, &s_panel_handle));
 
-    // 5. Cấu hình hiển thị màn hình
+    // 4. Cấu hình hiển thị màn hình
     ESP_ERROR_CHECK(esp_lcd_panel_reset(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_init(s_panel_handle));
     ESP_ERROR_CHECK(esp_lcd_panel_invert_color(s_panel_handle, false));
@@ -86,10 +80,6 @@ esp_err_t display_init(void)
     ESP_ERROR_CHECK(esp_lcd_panel_swap_xy(s_panel_handle, true));
     ESP_ERROR_CHECK(esp_lcd_panel_mirror(s_panel_handle, false, true));
     ESP_ERROR_CHECK(esp_lcd_panel_disp_on_off(s_panel_handle, true));
-
-    // Xóa màn hình về màu đen và bật đèn nền
-    display_clear(0x0000);
-    gpio_set_level(LCD_PIN_BK_LIGHT, 1);
 
     // create mutex to protect display SPI
     if (s_display_mutex == NULL) {
@@ -108,7 +98,6 @@ esp_err_t display_clear(uint16_t color)
     for (int y = 0; y < LCD_V_RES; y++) esp_lcd_panel_draw_bitmap(s_panel_handle, 0, y, LCD_H_RES, y + 1, s_line_buf);
     return ESP_OK;
 }
-
 
 esp_err_t display_show_rgb565(const void *rgb565_buf, int x_start, int y_start, int width, int height)
 {
@@ -141,6 +130,116 @@ esp_err_t display_show_rgb565(const void *rgb565_buf, int x_start, int y_start, 
     return ret;
 }
 
+void display_draw_pixel(uint16_t *buf, int buf_w, int buf_h, int x, int y, uint16_t color){
+    if(x >= 0 && x < buf_w && y >= 0 && y < buf_h){
+        buf[y * buf_w + x] = color;
+    }
+}
+
+void display_draw_char(uint16_t *buf, int buf_w, int buf_h, int x, int y, char c, uint16_t color)
+{
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = font8x8_basic[(int)c - 32];
+
+    for (int row = 0; row < 8; row++) {
+        uint8_t line = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            int px = x + col;
+            int py = y + row;
+            if (px >= 0 && px < buf_w && py >= 0 && py < buf_h) {
+                if (line & (1 << col)) {
+                    buf[py * buf_w + px] = color;
+                }
+            }
+        }
+    }
+}
+
+void display_draw_string(uint16_t *buf, int buf_w, int buf_h, int x, int y, const char *str, uint16_t color, bool shadow)
+{
+    if (str == NULL) return;
+
+    if(shadow){
+        // 1. draw text shadow
+        int cx = x +1, cy = y +1;
+        const char *p = str;
+        while(*p){
+            display_draw_char(buf, buf_w, buf_h, cx, cy, *p, COLOR_BLACK);
+            cx += 8;
+            p++;
+        }
+    }
+
+    // 2. draw white text
+    int cx = x;
+    while(*str){
+        display_draw_char(buf, buf_w, buf_h, cx, y, *str, color);
+        cx += 8;
+        str++;
+    }
+}
+
+void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h, 
+                            int img_w, int img_h, 
+                            bool is_video_mode, bool is_recording, uint32_t record_sec, 
+                            int fps, bool flash_on, uint32_t remaining_photos)
+{
+    if(buf == NULL) return;
+
+    // Upper header: capture mode
+    if (is_video_mode) {
+        if (is_recording) {
+            char rec_str[24];
+            snprintf(rec_str, sizeof(rec_str), "REC %02lu:%02lu", (unsigned long)(record_sec / 60), (unsigned long)(record_sec % 60));
+            display_draw_string(buf, buf_w, buf_h, 8, 8, rec_str, COLOR_WHITE, true);
+        } else {
+            display_draw_string(buf, buf_w, buf_h, 8, 8, "VIDEO", COLOR_WHITE, true);
+        }
+    } else {
+        display_draw_string(buf, buf_w, buf_h, 8, 8, "PHOTO", COLOR_WHITE, true);
+    }
+
+    // Right header: remaining photos
+    char rem_str[24];
+    if (remaining_photos > 9999){
+        snprintf(rem_str, sizeof(rem_str), "REM:9999+");    
+    } else {
+        snprintf(rem_str, sizeof(rem_str), "REM:%lu", (unsigned long)remaining_photos);
+    }
+    int rem_x = buf_w - ((int)strlen(rem_str)*8) - 8;
+    display_draw_string(buf, buf_w, buf_h, rem_x, 8, rem_str, COLOR_WHITE, true);
+
+    // Right Footer:s image resolution + fps
+    char res_str[32];
+    if(is_video_mode){
+        snprintf(res_str, sizeof(res_str), "%dx%d %dFPS", img_w, img_h, fps);
+    } else {
+        snprintf(res_str, sizeof(res_str), "%dx%d%s", img_w, img_h, flash_on?" [FL]": "");
+    }
+    display_draw_string(buf, buf_w, buf_h, 8, buf_h - 16, res_str, COLOR_WHITE, true);
+}
+
+void display_draw_osd_gallery(uint16_t *buf, int buf_w,
+                                int img_w, int img_h,
+                                int buf_h, uint32_t current_idx, uint32_t total_count)
+{
+    if (buf == NULL) return;
+
+    // Left header
+    display_draw_string(buf, buf_w, buf_h, 8, 8, "GALLERY", COLOR_WHITE, true);
+
+    // Right header
+    char idx_str[24];
+    snprintf(idx_str, sizeof(idx_str), "%lu/%lu", (unsigned long)current_idx, (unsigned long)total_count);
+    int idx_x = buf_w - (int)strlen(idx_str) * 8 - 8;
+    display_draw_string(buf, buf_w, buf_h, idx_x, 8, idx_str, COLOR_WHITE, true);
+
+    // Footer: Hướng dẫn nút
+    char res_str[24];
+    snprintf(res_str, sizeof(res_str), "%dx%d", img_h, img_w);
+    display_draw_string(buf, buf_w, buf_h, 8, buf_h - 30, res_str, COLOR_WHITE, true);
+    display_draw_string(buf, buf_w, buf_h, 8, buf_h - 16, "B1:DEL  B2:PREV  B3:NEXT  B4:CAM", COLOR_WHITE, true);
+}
 
 // Hàm đọc kích thước ảnh gốc từ file JPEG Header
 static bool get_jpeg_resolution(const uint8_t *data, size_t len, uint16_t *width, uint16_t *height)
@@ -239,6 +338,15 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     int y_start = (LCD_V_RES > out_h) ? (LCD_V_RES - out_h) / 2 : 0;
     int draw_w = (out_w > LCD_H_RES) ? LCD_H_RES : out_w;
     int draw_h = (out_h > LCD_V_RES) ? LCD_V_RES : out_h;
+
+    // lấy index ảnh để vẽ OSD gallery
+    uint32_t current_idx = 0;
+    const char *pname = strrchr(file_path, '/');
+    if(pname != NULL){
+        sscanf(pname+1, "photo_%lu.jpg", &current_idx);
+    }
+
+    display_draw_osd_gallery((uint16_t *)rgb_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, current_idx, storage_image_count());
 
     esp_err_t ret = display_show_rgb565(rgb_buf, x_start, y_start, draw_w, draw_h);
     

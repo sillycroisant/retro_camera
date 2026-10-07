@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_camera.h"
 #include "img_converters.h"
+#include "esp_timer.h"
 
 #include "stdio.h"
 #include "sys/stat.h"
@@ -36,16 +37,13 @@
 #define SAVE_TASK_PRIORITY          4
 
 #define CAMERA_EVENT_QUEUE_LENGTH   5
-#define CAMERA_FLASH_GPIO           4
 
-#define CAMERA_FLASH_DELAY_MS       80
 #define VIDEO_DIRECTORY             "/sdcard/videos"
 #define CAMERA_VIDEO_FPS            10
 
 // private types
 typedef struct 
 {
-    bool flash_enabled;
     camera_capture_mode_t capture_mode;
     bool recording;
     bool capturing;
@@ -57,12 +55,16 @@ typedef void (*camera_handler_t)(void);
 // private variables
 static camera_state_t s_camera =
 {
-    .flash_enabled = false,
     .capture_mode  = CAMERA_CAPTURE_PHOTO,
     .recording = false,
     .capturing = false,
     .video = NULL
 };
+
+static int s_real_fps = 0;
+static int s_fps_counter = 0;
+static int64_t s_last_fps_calc_time = 0;
+static int64_t s_record_start_time = 0;
 
 static TaskHandle_t s_camera_task = NULL;
 static TaskHandle_t s_video_task = NULL;
@@ -117,12 +119,12 @@ static void photo_save_task(void *arg);
 
 // event handlers for each buttons' input
 static void camera_handle_capture(void);
-static void camera_handle_toggle_flash_mode(void);
+// static void camera_handle_toggle_flash_mode(void);
+// thay hàm trên bằng hàm handle tính năng khác
 static void camera_handle_toggle_capture_mode(void);
 static void camera_handle_open_gallery(void);
 
 // helpers
-static void camera_set_flash_mode(bool enable);
 static void camera_set_capture_mode(camera_capture_mode_t mode);
 static void camera_capture_photo(void);
 static void camera_capture_video(void);
@@ -135,7 +137,7 @@ static bool camera_is_recording(void);
 static const camera_handler_t s_camera_handlers[CAMERA_EVENT_COUNT] = 
 {
     [CAMERA_EVENT_CAPTURE]      = camera_handle_capture,
-    [CAMERA_EVENT_FLASH_TOGGLE] = camera_handle_toggle_flash_mode,
+    [CAMERA_EVENT_FLASH_TOGGLE] = NULL,
     [CAMERA_EVENT_TOGGLE_VIDEO] = camera_handle_toggle_capture_mode,
     [CAMERA_EVENT_OPEN_GALLERY] = camera_handle_open_gallery
 };
@@ -168,24 +170,6 @@ static void camera_handle_toggle_capture_mode(void)
     }
 }
 
-// flash private functions (set, get, toggle)
-static void camera_set_flash_mode(bool enable)
-{
-    s_camera.flash_enabled = enable;
-    gpio_set_level(CAMERA_FLASH_GPIO, enable);
-    ESP_LOGI(TAG, "Flash %s", enable?"ON":"OFF");
-}
-
-bool camera_get_flash_mode(void)
-{
-    return s_camera.flash_enabled;
-}
-
-static void camera_handle_toggle_flash_mode(void)
-{
-    camera_set_flash_mode(!s_camera.flash_enabled);
-}
-
 // capture handler, execute capture when button pressed
 static void camera_handle_capture(void)
 {   
@@ -212,16 +196,7 @@ static void camera_capture_photo(void)
     ESP_LOGI(TAG,"[Core 1] Capturing snapshot...");
     s_camera.capturing = true; // flag bận để live view task tạm dừng 1 nhịp
 
-    if(s_camera.flash_enabled){
-        gpio_set_level(CAMERA_FLASH_GPIO, 1);
-        vTaskDelay(pdMS_TO_TICKS(CAMERA_FLASH_DELAY_MS));
-    }
-
     camera_fb_t *fb = esp_camera_fb_get();
-
-    if(s_camera.flash_enabled){
-        gpio_set_level(CAMERA_FLASH_GPIO, 0);
-    }
 
     if(fb == NULL)
     {
@@ -266,7 +241,6 @@ static void photo_save_task(void *arg){
         free(jpg_buf);
 
         if(ret != ESP_OK){
-    gpio_set_level(CAMERA_FLASH_GPIO, 0);
             ESP_LOGE(TAG, "Failed to save photo to SD card");
         } else {
             ESP_LOGI(TAG, "[Core 0] Photo saved to SD card successfully");
@@ -287,15 +261,16 @@ static bool camera_is_recording(void)
 static esp_err_t camera_start_video(void)
 {
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
-   if(s_camera.recording){
+    if(s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_OK;
-   }
-   s_camera.recording = true;
-   s_camera.video = NULL;
-   xSemaphoreGive(s_video_mutex);
-    
-   ESP_LOGI(TAG, "Video recording started");
+    }
+    s_camera.recording = true;
+    s_camera.video = NULL;
+    s_record_start_time = esp_timer_get_time(); // start record camera timer
+    xSemaphoreGive(s_video_mutex);
+
+    ESP_LOGI(TAG, "Video recording started");
     return ESP_OK;
 }
 
@@ -456,24 +431,6 @@ static esp_err_t camera_driver_init(void)
     return ESP_OK;
 }
 
-static esp_err_t camera_flash_init(void)
-{
-    gpio_config_t io = 
-    {
-        .pin_bit_mask = 1ULL << CAMERA_FLASH_GPIO,
-        .mode = GPIO_MODE_OUTPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE
-    };
-
-    ESP_ERROR_CHECK(gpio_config(&io));
-    gpio_set_level(CAMERA_FLASH_GPIO, 0);
-    s_camera.flash_enabled = false;
-    ESP_LOGI(TAG, "Flash initialized, mode OFF");
-    return ESP_OK;
-}
-
 // camera task (run on core 1)
 static void camera_task(void *arg)
 {
@@ -494,6 +451,7 @@ static void camera_task(void *arg)
 // liveview task (run on core 1)
 static void liveview_task(void *arg){
     ESP_LOGI(TAG, "Real-time Liveview task started on Core 1");
+    s_last_fps_calc_time = esp_timer_get_time();
 
     while(true){
         // ktra mode hiện tại, nếu gallery hoặc chụp/ghi -> tạm dừng live
@@ -506,12 +464,36 @@ static void liveview_task(void *arg){
         // lấy frame từ camera
         camera_fb_t *fb = esp_camera_fb_get();
         if(fb != NULL){
+            // 1. calculate fps
+            int64_t now = esp_timer_get_time();
+            s_fps_counter ++;
+            if(now - s_last_fps_calc_time >= 1000000){
+                s_real_fps = s_fps_counter;
+                s_fps_counter = 0;
+                s_last_fps_calc_time = now;
+            }
+
+            // 2. calculate video timer
+            uint32_t record_sec = 0;
+            bool is_video = (s_camera.capture_mode == CAMERA_CAPTURE_VIDEO);
+            bool is_rec = s_camera.recording;
+            if(is_rec && s_record_start_time > 0){
+                record_sec = (uint32_t)((now - s_record_start_time)/1000000);
+            }
+
+            uint32_t rem_photos = storage_get_remaining_photos();
+
+            // 3. draw OSD into frame buffer
+            display_draw_osd_camera((uint16_t*)fb->buf, fb->width, fb->height, 
+                                    fb->width, fb->height, is_video, is_rec,
+                                    record_sec, s_real_fps, 1, rem_photos);
+            
             // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh // cẩn thận bị tràn khung ảnh -> core panic
             display_show_rgb565(fb->buf, 0,0, fb->width, fb->height);
             esp_camera_fb_return(fb);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20)); // delay để giữ fps ổn định và nhường cho cpu
+        vTaskDelay(pdMS_TO_TICKS(10)); // delay để giữ fps ổn định và nhường cho cpu
     }
 }
 
@@ -558,7 +540,6 @@ static void video_task(void *arg)
 esp_err_t camera_init(void)
 {
     ESP_ERROR_CHECK(camera_driver_init());
-    ESP_ERROR_CHECK(camera_flash_init());
 
     s_video_mutex = xSemaphoreCreateMutex();
     if(s_video_mutex == NULL){
@@ -575,7 +556,7 @@ esp_err_t camera_init(void)
     s_subscriber = events_subscribe(EVENT_MASK_CAMERA, CAMERA_EVENT_QUEUE_LENGTH);
     if(s_subscriber == NULL) return ESP_FAIL;
 
-    ESP_LOGI(TAG, "Camera initialized driver and flash successfully.");
+    ESP_LOGI(TAG, "Camera initialized driver successfully.");
     return ESP_OK;
 }
 

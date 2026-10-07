@@ -23,8 +23,8 @@
 
 #define GPIO_BUTTON_ID_1 GPIO_NUM_0 // dùng nút boot có sẵn trên bo mạch
 #define GPIO_BUTTON_ID_2 GPIO_NUM_3 
-#define GPIO_BUTTON_ID_3 GPIO_NUM_42
-#define GPIO_BUTTON_ID_4 GPIO_NUM_41
+#define GPIO_BUTTON_ID_3 GPIO_NUM_41
+#define GPIO_BUTTON_ID_4 GPIO_NUM_42
 
 typedef enum
 {

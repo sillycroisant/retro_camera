@@ -7,7 +7,7 @@
 #include "esp_err.h"
 
 #ifdef __cplusplus
-extern "C" {
+extern "C" { 
 #endif
 
 typedef struct 
@@ -93,6 +93,22 @@ esp_err_t storage_video_abort(storage_video_t *video);
 uint32_t storage_get_current_index(void);
 
 esp_err_t storage_get_path_by_index(uint32_t index, char *out_path, size_t max_len);
+
+/**
+ * @brief Quét lại toàn bộ thư mục /sdcard/photos để đồng bộ index.dat
+ */
+esp_err_t storage_rescan(void);
+
+/**
+ * @brief Xóa một bức ảnh khỏi thẻ nhớ và tự động cập nhật index.dat
+ * @param index Chỉ số ảnh cần xóa
+ */
+esp_err_t storage_delete_photo(uint32_t index);
+
+/***
+ * @brief Ước tính số lượng ảnh còn có thể chụp dựa vào dung lượng trống thẻ nhớ
+ */
+uint32_t storage_get_remaining_photos(void);
 
 #ifdef __cplustplus
 }

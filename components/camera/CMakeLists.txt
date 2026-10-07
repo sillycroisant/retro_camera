@@ -12,4 +12,5 @@ idf_component_register(
         storage
         display
         gallery
+        esp_timer
 )
