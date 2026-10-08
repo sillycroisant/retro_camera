@@ -23,8 +23,10 @@ void app_main(void)
     gallery_init();
     storage_init();
     display_init();
+    display_show_splash_screen("RETRO CAMERA", "ViNtAgE dIgItAl CaM", "- sillycroisant..");
     input_init();
     
+    vTaskDelay(pdMS_TO_TICKS(2000));
     camera_start();
     gallery_start();
     input_start();

@@ -182,11 +182,12 @@ void display_draw_string(uint16_t *buf, int buf_w, int buf_h, int x, int y, cons
 void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h, 
                             int img_w, int img_h, 
                             bool is_video_mode, bool is_recording, uint32_t record_sec, 
-                            int fps, bool flash_on, uint32_t remaining_photos)
+                            int fps, bool flash_on, uint32_t remaining_photos,
+                            int battery_pct, bool sd_ok)
 {
     if(buf == NULL) return;
 
-    // Upper header: capture mode
+    // 1. Upper header: capture mode
     if (is_video_mode) {
         if (is_recording) {
             char rec_str[24];
@@ -199,17 +200,24 @@ void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h,
         display_draw_string(buf, buf_w, buf_h, 8, 8, "PHOTO", COLOR_WHITE, true);
     }
 
-    // Right header: remaining photos
+    // 2. Middle header: remaining photos
     char rem_str[24];
     if (remaining_photos > 9999){
         snprintf(rem_str, sizeof(rem_str), "REM:9999+");    
     } else {
         snprintf(rem_str, sizeof(rem_str), "REM:%lu", (unsigned long)remaining_photos);
     }
-    int rem_x = buf_w - ((int)strlen(rem_str)*8) - 8;
+    int rem_x = (buf_w - (int)strlen(rem_str) * 8) / 2;
     display_draw_string(buf, buf_w, buf_h, rem_x, 8, rem_str, COLOR_WHITE, true);
 
-    // Right Footer:s image resolution + fps
+    // 3. Right header: pin + battery percentage
+    char status_str[32];
+    snprintf(status_str, sizeof(status_str), "%s BAT:%d%%", sd_ok ? "[SD]" : "[NO SD]", battery_pct);
+    int status_x = buf_w - ((int)strlen(status_str)*8) - 8;
+    display_draw_string(buf, buf_w, buf_h, status_x, 8, status_str, COLOR_WHITE, true);
+
+
+    // Left Footer: image resolution + fps
     char res_str[32];
     if(is_video_mode){
         snprintf(res_str, sizeof(res_str), "%dx%d %dFPS", img_w, img_h, fps);
@@ -234,7 +242,7 @@ void display_draw_osd_gallery(uint16_t *buf, int buf_w,
     int idx_x = buf_w - (int)strlen(idx_str) * 8 - 8;
     display_draw_string(buf, buf_w, buf_h, idx_x, 8, idx_str, COLOR_WHITE, true);
 
-    // Footer: Hướng dẫn nút
+    // Footer: Hướng dẫn núts
     char res_str[24];
     snprintf(res_str, sizeof(res_str), "%dx%d", img_h, img_w);
     display_draw_string(buf, buf_w, buf_h, 8, buf_h - 30, res_str, COLOR_WHITE, true);
@@ -264,95 +272,97 @@ static bool get_jpeg_resolution(const uint8_t *data, size_t len, uint16_t *width
     return false;
 }
 
-
+static void resize_rgb565_image(const uint16_t *src, int src_w, int src_h,
+                               uint16_t *dst, int dst_w, int dst_h)
+{
+    for (int y = 0; y < dst_h; y++) {
+        int src_y = (y * src_h) / dst_h;
+        const uint16_t *src_row = &src[src_y * src_w];
+        uint16_t *dst_row = &dst[y * dst_w];
+        for (int x = 0; x < dst_w; x++) {
+            int src_x = (x * src_w) / dst_w;
+            dst_row[x] = src_row[src_x];
+        }
+    }
+}
 esp_err_t display_show_jpeg_file(const char *file_path)
 {
     if (s_panel_handle == NULL || file_path == NULL) return ESP_ERR_INVALID_ARG;
-
     FILE *fp = fopen(file_path, "rb");
     if (fp == NULL) {
         ESP_LOGE(TAG, "Cannot open image: %s", file_path);
         return ESP_ERR_NOT_FOUND;
     }
-
     fseek(fp, 0, SEEK_END);
     size_t file_size = ftell(fp);
     rewind(fp);
-
     uint8_t *jpg_buf = heap_caps_malloc(file_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (jpg_buf == NULL) {
         fclose(fp);
-        ESP_LOGE(TAG, "Cannot allocate memory for JPG file (%u bytes)", (unsigned)file_size);
         return ESP_ERR_NO_MEM;
     }
-
     fread(jpg_buf, 1, file_size, fp);
     fclose(fp);
-
-    // 1. Đọc kích thước gốc của ảnh JPEG
+    // 1. Đọc kích thước gốc từ JPEG Header
     uint16_t img_w = 0, img_h = 0;
     if (!get_jpeg_resolution(jpg_buf, file_size, &img_w, &img_h)) {
         free(jpg_buf);
         ESP_LOGE(TAG, "Invalid JPEG format: %s", file_path);
         return ESP_FAIL;
     }
-
-    // 2. Tự động tính toán tỉ lệ Scale để vừa khít màn hình 320x240
+    // 2. Chọn Scale phần cứng phù hợp nhất để tiết kiệm RAM
     esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
-    uint16_t out_w = img_w;
-    uint16_t out_h = img_h;
-
+    uint16_t dec_w = img_w;
+    uint16_t dec_h = img_h;
     if (img_w >= 1280 || img_h >= 960) {
         scale = JPEG_IMAGE_SCALE_1_4;
-        out_w = img_w / 4;
-        out_h = img_h / 4;
+        dec_w = img_w / 4;
+        dec_h = img_h / 4;
     } else if (img_w >= 640 || img_h >= 480) {
         scale = JPEG_IMAGE_SCALE_1_2;
-        out_w = img_w / 2;
-        out_h = img_h / 2;
+        dec_w = img_w / 2;
+        dec_h = img_h / 2;
     }
-
-    ESP_LOGI(TAG, "Decoding JPEG: %s (%ux%u -> %ux%u)", file_path, img_w, img_h, out_w, out_h);
-
-    // 3. Cấp phát đúng dung lượng buffer RGB565 cần thiết (Không bao giờ tràn)
-    size_t rgb_size = (size_t)out_w * out_h * sizeof(uint16_t);
-    uint8_t *rgb_buf = heap_caps_malloc(rgb_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (rgb_buf == NULL) {
+    // 3. Cấp phát buffer giải nén JPEG
+    size_t dec_size = (size_t)dec_w * dec_h * sizeof(uint16_t);
+    uint16_t *dec_buf = heap_caps_malloc(dec_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (dec_buf == NULL) {
         free(jpg_buf);
-        ESP_LOGE(TAG, "Cannot allocate %u bytes for RGB buffer", (unsigned)rgb_size);
         return ESP_ERR_NO_MEM;
     }
-
-    // 4. Giải nén JPEG sang RGB565 an toàn
-    bool ok = jpg2rgb565(jpg_buf, file_size, rgb_buf, scale);
+    bool ok = jpg2rgb565(jpg_buf, file_size, (uint8_t *)dec_buf, scale);
     free(jpg_buf);
-
     if (!ok) {
-        free(rgb_buf);
+        free(dec_buf);
         ESP_LOGE(TAG, "Failed to decode JPEG image");
         return ESP_FAIL;
     }
-
-    // 5. Căn giữa và vẽ lên màn hình ST7789
-    int x_start = (LCD_H_RES > out_w) ? (LCD_H_RES - out_w) / 2 : 0;
-    int y_start = (LCD_V_RES > out_h) ? (LCD_V_RES - out_h) / 2 : 0;
-    int draw_w = (out_w > LCD_H_RES) ? LCD_H_RES : out_w;
-    int draw_h = (out_h > LCD_V_RES) ? LCD_V_RES : out_h;
-
-    // lấy index ảnh để vẽ OSD gallery
+    // 4. Cấp phát buffer toàn màn hình chuẩn 320x240
+    size_t full_size = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
+    uint16_t *full_buf = heap_caps_malloc(full_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (full_buf == NULL) {
+        free(dec_buf);
+        return ESP_ERR_NO_MEM;
+    }
+    // Xóa nền đen toàn khung
+    memset(full_buf, 0, full_size);
+    // 5. Nếu ảnh khớp 320x240 thì copy trực tiếp, nếu khác thì Resize vừa khít 320x240
+    if (dec_w == LCD_H_RES && dec_h == LCD_V_RES) {
+        memcpy(full_buf, dec_buf, full_size);
+    } else {
+        resize_rgb565_image(dec_buf, dec_w, dec_h, full_buf, LCD_H_RES, LCD_V_RES);
+    }
+    free(dec_buf);
+    // 6. Lấy index ảnh và vẽ OSD Gallery lên buffer 320x240
     uint32_t current_idx = 0;
     const char *pname = strrchr(file_path, '/');
-    if(pname != NULL){
-        sscanf(pname+1, "photo_%lu.jpg", &current_idx);
+    if (pname != NULL) {
+        sscanf(pname + 1, "photo_%lu.jpg", &current_idx);
     }
-
-    display_draw_osd_gallery((uint16_t *)rgb_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, current_idx, storage_image_count());
-
-    esp_err_t ret = display_show_rgb565(rgb_buf, x_start, y_start, draw_w, draw_h);
-    
-    // Giải phóng buffer sạch sẽ sau khi vẽ xong
-    free(rgb_buf);
-    ESP_LOGI(TAG, "Rendered image to LCD successfully: %s", file_path);
+    display_draw_osd_gallery(full_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, current_idx, storage_image_count());
+    // 7. Xuất ra LCD ST7789 với kích thước chuẩn 320x240
+    esp_err_t ret = display_show_rgb565(full_buf, 0, 0, LCD_H_RES, LCD_V_RES);
+    free(full_buf);
     return ret;
 }
 
@@ -366,4 +376,39 @@ esp_err_t display_show_latest_photo(void)
     }
 
     return display_show_jpeg_file(path);
+}
+
+void display_show_splash_screen(const char *title, const char *subtitle, const char *author){
+    if(s_panel_handle == NULL) return;
+
+    size_t buf_size = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
+    uint16_t *splash_buf = heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (splash_buf == NULL) return;
+    // Nền đen
+    memset(splash_buf, 0, buf_size);
+    // Vẽ khung viền Retro ngoài cùng
+    for (int x = 10; x < LCD_H_RES - 10; x++) {
+        splash_buf[10 * LCD_H_RES + x] = COLOR_WHITE;
+        splash_buf[(LCD_V_RES - 10) * LCD_H_RES + x] = COLOR_WHITE;
+    }
+    for (int y = 10; y < LCD_V_RES - 10; y++) {
+        splash_buf[y * LCD_H_RES + 10] = COLOR_WHITE;
+        splash_buf[y * LCD_H_RES + (LCD_H_RES - 10)] = COLOR_WHITE;
+    }
+    // Tiêu đề lớn ở giữa
+    int title_x = (LCD_H_RES - (int)strlen(title) * 8) / 2;
+    display_draw_string(splash_buf, LCD_H_RES, LCD_V_RES, title_x, 80, title, COLOR_WHITE, false);
+    // Dòng phụ đề
+    int sub_x = (LCD_H_RES - (int)strlen(subtitle) * 8) / 2;
+    display_draw_string(splash_buf, LCD_H_RES, LCD_V_RES, sub_x, 110, subtitle, COLOR_WHITE, false);
+    // Dấu ấn tác giả
+    if (author != NULL) {
+        int auth_x = (LCD_H_RES - (int)strlen(author) * 8) / 2;
+        display_draw_string(splash_buf, LCD_H_RES, LCD_V_RES, auth_x, 150, author, COLOR_WHITE, false);
+    }
+    // Trạng thái tải
+    int load_x = (LCD_H_RES - 18 * 8) / 2;
+    display_draw_string(splash_buf, LCD_H_RES, LCD_V_RES, load_x, 190, "[ INITIALIZING... ]", COLOR_WHITE, false);
+    display_show_rgb565(splash_buf, 0, 0, LCD_H_RES, LCD_V_RES);
+    free(splash_buf);
 }

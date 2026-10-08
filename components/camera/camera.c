@@ -61,11 +61,18 @@ static camera_state_t s_camera =
     .video = NULL
 };
 
+// FPS
 static int s_real_fps = 0;
 static int s_fps_counter = 0;
 static int64_t s_last_fps_calc_time = 0;
 static int64_t s_record_start_time = 0;
 
+// Buffer and cache
+static uint16_t *s_live_lcd_buf = NULL;
+static uint32_t s_cached_rem_photos = 0;
+static int64_t s_last_rem_poll_time = 0;
+
+// Task
 static TaskHandle_t s_camera_task = NULL;
 static TaskHandle_t s_video_task = NULL;
 static TaskHandle_t s_liveview_task = NULL;
@@ -183,6 +190,36 @@ static void camera_handle_capture(void)
     }
 }
 
+static void downsample_to_lcd(const uint16_t *src, int src_w, int src_h, uint16_t *dst){
+// Fast path: VGA 640x480 -> QVGA 320x240 (Reads 2 pixels per 32-bit cycle)
+    if (src_w == 640 && src_h == 480) {
+        for (int y = 0; y < 240; y++) {
+            const uint32_t *src32 = (const uint32_t *)&src[(y * 2) * 640];
+            uint16_t *dst16 = &dst[y * 320];
+            for (int x = 0; x < 320; x += 2) {
+                uint32_t p0_p1 = src32[x];     // Contains pixel (2x) and (2x+1)
+                uint32_t p2_p3 = src32[x + 1]; // Contains pixel (2x+2) and (2x+3)
+                dst16[x]     = (uint16_t)p0_p1;
+                dst16[x + 1] = (uint16_t)p2_p3;
+            }
+        }
+    } else {
+        // General path (SVGA/HD): 16.16 Fixed-point stepping (NO division in loop)
+        uint32_t x_ratio = ((uint32_t)src_w << 16) / 320;
+        uint32_t y_ratio = ((uint32_t)src_h << 16) / 240;
+        for (int y = 0; y < 240; y++) {
+            int src_y = (int)((y * y_ratio) >> 16);
+            const uint16_t *src_row = &src[src_y * src_w];
+            uint16_t *dst_row = &dst[y * 320];
+            uint32_t src_x_fp = 0;
+            for (int x = 0; x < 320; x++) {
+                dst_row[x] = src_row[src_x_fp >> 16];
+                src_x_fp += x_ratio;
+            }
+        }
+    }
+}
+
 // open gallery mode
 static void camera_handle_open_gallery(void)
 {
@@ -206,7 +243,12 @@ static void camera_capture_photo(void)
     }
 
     // 1. HIỂN THỊ NGAY BỨC ẢNH VỪA CHỤP LÊN LCD ST7789
-    display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
+    if(fb->width == LCD_H_RES && fb->height == LCD_V_RES){
+        display_show_rgb565(fb->buf, 0, 0, LCD_H_RES, LCD_V_RES);
+    } else if (s_live_lcd_buf != NULL) {
+        downsample_to_lcd((const uint16_t *)fb->buf, fb->width, fb->height, s_live_lcd_buf);
+        display_show_rgb565(s_live_lcd_buf, 0, 0, LCD_H_RES, LCD_V_RES);
+    }
 
     // đẩy frame buffer sang queue để core 0 nén jpeg và ghi thẻ nhớ ngầm
     if(xQueueSend(s_save_queue, &fb, 0) != pdPASS) {
@@ -319,7 +361,7 @@ static esp_err_t camera_record_frame(void)
     }
 
     // hiển thị frame đang quay lên màn hình live view
-    display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
+    // display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
 
     // nén frame sang jpeg để ghi vào container avi
     uint8_t *jpg_buf = NULL;
@@ -452,19 +494,22 @@ static void camera_task(void *arg)
 static void liveview_task(void *arg){
     ESP_LOGI(TAG, "Real-time Liveview task started on Core 1");
     s_last_fps_calc_time = esp_timer_get_time();
+    s_last_rem_poll_time = esp_timer_get_time();
+    s_cached_rem_photos = storage_get_remaining_photos();
 
     while(true){
         // ktra mode hiện tại, nếu gallery hoặc chụp/ghi -> tạm dừng live
         if(mode_get() != APP_MODE_CAMERA || s_camera.capturing){
             // nếu đang quay video thì hiển thị thêm thông tin lên liveview để user biết, ko tạm dừng
-            vTaskDelay(pdMS_TO_TICKS(50));
+            vTaskDelay(pdMS_TO_TICKS(20));
             continue;
         }
 
         // lấy frame từ camera
         camera_fb_t *fb = esp_camera_fb_get();
         if(fb != NULL){
-            // 1. calculate fps
+
+            // 1. calculate fps every seconds
             int64_t now = esp_timer_get_time();
             s_fps_counter ++;
             if(now - s_last_fps_calc_time >= 1000000){
@@ -472,24 +517,35 @@ static void liveview_task(void *arg){
                 s_fps_counter = 0;
                 s_last_fps_calc_time = now;
             }
+            
+            // 2. update remain photos storage every 10 seconds
+            if(now - s_last_rem_poll_time >= 10000000){
+                s_cached_rem_photos = storage_get_remaining_photos();
+                s_last_rem_poll_time = now;
+            }
 
-            // 2. calculate video timer
+            // 3. calculate video timer
             uint32_t record_sec = 0;
             bool is_video = (s_camera.capture_mode == CAMERA_CAPTURE_VIDEO);
             bool is_rec = s_camera.recording;
             if(is_rec && s_record_start_time > 0){
                 record_sec = (uint32_t)((now - s_record_start_time)/1000000);
             }
+            
+            // 4. Resize camera frame to lcd 320x240
+            if(fb->width == LCD_H_RES && fb->height == LCD_V_RES){
+                memcpy(s_live_lcd_buf, fb->buf, LCD_H_RES * LCD_V_RES * sizeof(uint16_t));
+            } else {
+                downsample_to_lcd((const uint16_t *)fb->buf, fb->width, fb->height, s_live_lcd_buf);
+            }
 
-            uint32_t rem_photos = storage_get_remaining_photos();
-
-            // 3. draw OSD into frame buffer
-            display_draw_osd_camera((uint16_t*)fb->buf, fb->width, fb->height, 
+            // 5. draw OSD into frame buffer
+            display_draw_osd_camera(s_live_lcd_buf, LCD_H_RES, LCD_V_RES, 
                                     fb->width, fb->height, is_video, is_rec,
-                                    record_sec, s_real_fps, 1, rem_photos);
+                                    record_sec, s_real_fps, 1, s_cached_rem_photos, 80, 1);
             
             // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh // cẩn thận bị tràn khung ảnh -> core panic
-            display_show_rgb565(fb->buf, 0,0, fb->width, fb->height);
+            display_show_rgb565(s_live_lcd_buf, 0,0, LCD_H_RES, LCD_V_RES);
             esp_camera_fb_return(fb);
         }
 
@@ -540,6 +596,15 @@ static void video_task(void *arg)
 esp_err_t camera_init(void)
 {
     ESP_ERROR_CHECK(camera_driver_init());
+
+    // allocate a 320x240 buffer only when init
+    if(s_live_lcd_buf == NULL){
+        s_live_lcd_buf = heap_caps_malloc(LCD_H_RES * LCD_V_RES * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if(s_live_lcd_buf == NULL) {
+            ESP_LOGE(TAG, "Cannot allocate static LCD buffer");
+            return ESP_ERR_NO_MEM;
+        }
+    }
 
     s_video_mutex = xSemaphoreCreateMutex();
     if(s_video_mutex == NULL){

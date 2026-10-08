@@ -23,7 +23,8 @@ void display_draw_string(uint16_t *buf, int buf_w, int buf_h, int x, int y, cons
 
 void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h, int img_w, int img_h, 
                                 bool is_video_mode, bool is_recording, uint32_t record_sec, 
-                                int fps, bool flash_on, uint32_t remaining_photos);
+                                int fps, bool flash_on, uint32_t remaining_photos,
+                                int battery_pct, bool sd_ok);
 
 void display_draw_osd_gallery(uint16_t *buf, int buf_w, int buf_h, int img_w, int img_h,
                                 uint32_t current_idx, uint32_t total_count);
@@ -52,6 +53,8 @@ esp_err_t display_show_latest_photo(void);
  * @brief Xóa màn hình với một màu đơn sắc (RGB565)
  */
 esp_err_t display_clear(uint16_t color);
+
+void display_show_splash_screen(const char *title, const char *subtitle, const char *author);
 
 #ifdef __cplusplus
 }
