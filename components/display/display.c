@@ -29,7 +29,7 @@
 #define LCD_PIN_BK_LIGHT -1            // chân BK light mặc định 3v3
 
 #define LCD_SPI_HOST     SPI2_HOST
-#define LCD_CHUNK_LINES  40
+#define LCD_CHUNK_LINES  120
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static SemaphoreHandle_t s_display_mutex = NULL;
@@ -47,7 +47,7 @@ esp_err_t display_init(void)
         .miso_io_num = -1,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
-        .max_transfer_sz = LCD_H_RES * LCD_CHUNK_LINES * sizeof(uint16_t),
+        .max_transfer_sz = LCD_H_RES * LCD_V_RES * sizeof(uint16_t),
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
 
@@ -56,7 +56,7 @@ esp_err_t display_init(void)
     esp_lcd_panel_io_spi_config_t io_config = {
         .dc_gpio_num = LCD_PIN_DC,
         .cs_gpio_num = LCD_PIN_CS,
-        .pclk_hz = 40 * 1000 * 1000, // Tần số SPI 40MHz
+        .pclk_hz = 60 * 1000 * 1000, // Tần số SPI 60MHz
         .lcd_cmd_bits = 8,
         .lcd_param_bits = 8,
         .spi_mode = 0,
@@ -242,7 +242,7 @@ void display_draw_osd_gallery(uint16_t *buf, int buf_w,
     int idx_x = buf_w - (int)strlen(idx_str) * 8 - 8;
     display_draw_string(buf, buf_w, buf_h, idx_x, 8, idx_str, COLOR_WHITE, true);
 
-    // Footer: Hướng dẫn núts
+    // Footer: Hướng dẫn nút
     char res_str[24];
     snprintf(res_str, sizeof(res_str), "%dx%d", img_h, img_w);
     display_draw_string(buf, buf_w, buf_h, 8, buf_h - 30, res_str, COLOR_WHITE, true);
@@ -303,6 +303,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     }
     fread(jpg_buf, 1, file_size, fp);
     fclose(fp);
+
     // 1. Đọc kích thước gốc từ JPEG Header
     uint16_t img_w = 0, img_h = 0;
     if (!get_jpeg_resolution(jpg_buf, file_size, &img_w, &img_h)) {
@@ -310,6 +311,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         ESP_LOGE(TAG, "Invalid JPEG format: %s", file_path);
         return ESP_FAIL;
     }
+    
     // 2. Chọn Scale phần cứng phù hợp nhất để tiết kiệm RAM
     esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
     uint16_t dec_w = img_w;

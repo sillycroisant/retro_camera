@@ -28,7 +28,6 @@ void gallery_display_current_photo(void)
 
     if(s_current_photo_idx == 0) s_current_photo_idx = storage_get_current_index();
 
-
     if(s_current_photo_idx == 0){
         ESP_LOGI(TAG, "No photos found on SD card");
         return;
@@ -93,10 +92,23 @@ static void gallery_handle_scroll_next(void)
     ESP_LOGI(TAG, "CURRENT PHOTO INDEX = %lu", s_current_photo_idx);
 }
 
+static void gallery_handle_delete_photo(void){
+    if(s_current_photo_idx == 0) return;
+    ESP_LOGI(TAG, "Gallery: Deleting photo [%lu]...", (unsigned long)s_current_photo_idx);
+    esp_err_t ret = storage_delete_photo(s_current_photo_idx);
+
+    if(ret == ESP_OK) {
+        gallery_handle_scroll_next();
+        s_cached_rem_photos = storage_get_remaining_photos();
+    } else {
+        ESP_LOGE(TAG, "Failed to delete photo");
+    }
+}
+
 // 2. Bảng Dispatch Table định tuyến Event
 static const gallery_handler_t s_gallery_handlers[GALLERY_EVENT_COUNT] = 
 {
-    [GALLERY_EVENT_DUMMY]       = NULL,
+    [GALLERY_EVENT_DELETE]       =  gallery_handle_delete_photo,
     [GALLERY_EVENT_SCROLL_FORWARD]   = gallery_handle_scroll_previous,
     [GALLERY_EVENT_SCROLL_BACK] = gallery_handle_scroll_next,
     [GALLERY_EVENT_OPEN_CAMERA] = gallery_handle_open_camera

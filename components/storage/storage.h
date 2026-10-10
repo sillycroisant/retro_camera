@@ -24,6 +24,8 @@ typedef struct
 
 typedef struct storage_video storage_video_t;
 
+extern uint32_t s_cached_rem_photos;
+
 /**
  * @brief Mount SD card and prepare photos folder
  */
@@ -110,7 +112,7 @@ esp_err_t storage_delete_photo(uint32_t index);
  */
 uint32_t storage_get_remaining_photos(void);
 
-#ifdef __cplustplus
+#ifdef __cplusplus
 }
 #endif
 

@@ -61,6 +61,13 @@ static camera_state_t s_camera =
     .video = NULL
 };
 
+typedef struct {
+    uint8_t *data;
+    size_t len;
+    uint32_t width;
+    uint32_t height;
+} video_raw_frame_t;
+
 // FPS
 static int s_real_fps = 0;
 static int s_fps_counter = 0;
@@ -69,14 +76,14 @@ static int64_t s_record_start_time = 0;
 
 // Buffer and cache
 static uint16_t *s_live_lcd_buf = NULL;
-static uint32_t s_cached_rem_photos = 0;
-static int64_t s_last_rem_poll_time = 0;
 
-// Task
+// Task on core 0
 static TaskHandle_t s_camera_task = NULL;
-static TaskHandle_t s_video_task = NULL;
 static TaskHandle_t s_liveview_task = NULL;
+
+// Task on core 1
 static TaskHandle_t s_save_task = NULL;
+static TaskHandle_t s_video_record_task = NULL;
 
 static QueueHandle_t s_save_queue = NULL;
 static SemaphoreHandle_t s_video_mutex = NULL;
@@ -109,8 +116,8 @@ static camera_config_t s_camera_config =
     .ledc_channel = LEDC_CHANNEL_0,
 
     .pixel_format = PIXFORMAT_RGB565,
-    .frame_size = FRAMESIZE_QVGA,
-    .jpeg_quality = 12,
+    .frame_size = FRAMESIZE_VGA,
+    .jpeg_quality = 15,
 
     // esp32s3 có 8mb octal psram, nên dùng 2 framebuffer
     .fb_count = 2,
@@ -120,7 +127,6 @@ static camera_config_t s_camera_config =
 
 // private function prototypes
 static void camera_task(void *arg);
-static void video_task(void *arg);
 static void liveview_task(void *arg);
 static void photo_save_task(void *arg);
 
@@ -137,7 +143,7 @@ static void camera_capture_photo(void);
 static void camera_capture_video(void);
 static esp_err_t camera_start_video(void);
 static esp_err_t camera_stop_video(void);
-static esp_err_t camera_record_frame(void);
+static esp_err_t camera_record_frame_from_fb(camera_fb_t *fb);
 static bool camera_is_recording(void);
 
 // dispatch table
@@ -146,8 +152,10 @@ static const camera_handler_t s_camera_handlers[CAMERA_EVENT_COUNT] =
     [CAMERA_EVENT_CAPTURE]      = camera_handle_capture,
     [CAMERA_EVENT_FLASH_TOGGLE] = NULL,
     [CAMERA_EVENT_TOGGLE_VIDEO] = camera_handle_toggle_capture_mode,
+    // [CAMERA_EVENT_TOGGLE_VIDEO] = NULL,
     [CAMERA_EVENT_OPEN_GALLERY] = camera_handle_open_gallery
 };
+
 
 // capture private functions (set, get, toggle)
 static void camera_set_capture_mode(camera_capture_mode_t mode)
@@ -231,32 +239,39 @@ static void camera_handle_open_gallery(void)
 static void camera_capture_photo(void)
 {
     ESP_LOGI(TAG,"[Core 1] Capturing snapshot...");
-    s_camera.capturing = true; // flag bận để live view task tạm dừng 1 nhịp
+    s_camera.capturing = true; // pause live view
 
+    // Xả 2 frame cũ còn nằm trong bộ đệm DMA
+    for(int i = 0; i < 2; i++){
+        camera_fb_t *dummy = esp_camera_fb_get();
+        if (dummy) esp_camera_fb_return(dummy);
+    }
+
+    // 2. Lấy Frame JPEG phần cứng (1600x1200) từ OV3660
     camera_fb_t *fb = esp_camera_fb_get();
-
-    if(fb == NULL)
-    {
-        ESP_LOGE(TAG, "Camera capture failed."); 
+    if (fb == NULL) {
+        ESP_LOGE(TAG, "Failed to capture frame photo");
         s_camera.capturing = false;
         return;
     }
 
-    // 1. HIỂN THỊ NGAY BỨC ẢNH VỪA CHỤP LÊN LCD ST7789
-    if(fb->width == LCD_H_RES && fb->height == LCD_V_RES){
-        display_show_rgb565(fb->buf, 0, 0, LCD_H_RES, LCD_V_RES);
-    } else if (s_live_lcd_buf != NULL) {
+    ESP_LOGI(TAG, "Captured Frame: %dx%d (%u bytes)", fb->width, fb->height, (unsigned)fb->len);
+    
+    // Show preview frame on LCD ST7789
+    if (s_live_lcd_buf != NULL) {
         downsample_to_lcd((const uint16_t *)fb->buf, fb->width, fb->height, s_live_lcd_buf);
         display_show_rgb565(s_live_lcd_buf, 0, 0, LCD_H_RES, LCD_V_RES);
     }
 
-    // đẩy frame buffer sang queue để core 0 nén jpeg và ghi thẻ nhớ ngầm
+    // đẩy frame buffer 1600x1200 sang queue để core 0 nén jpeg và ghi thẻ nhớ ngầm
     if(xQueueSend(s_save_queue, &fb, 0) != pdPASS) {
         ESP_LOGW(TAG, "Save queue full, dropping snapshot");
         esp_camera_fb_return(fb);
     }
+    
     // keep the captured img for a short duration
-    vTaskDelay(pdMS_TO_TICKS(80));
+    vTaskDelay(pdMS_TO_TICKS(100));
+    s_cached_rem_photos = storage_get_remaining_photos();
     s_camera.capturing = false;
 }
 
@@ -266,16 +281,23 @@ static void photo_save_task(void *arg){
 
     while(true){
         if(xQueueReceive(s_save_queue, &fb, portMAX_DELAY) != pdTRUE || fb == NULL) continue;
+        ESP_LOGI(TAG, "[Core 0] Nén JPEG ảnh độ nét cao (%dx%d)..", fb->width, fb->height);
+        
+        if (fb->buf == NULL || fb->len == 0 || fb->width == 0 || fb->height == 0) {
+            ESP_LOGE(TAG, "Invalid frame buffer received in save task");
+            esp_camera_fb_return(fb);
+            continue;
+        }
 
-        ESP_LOGI(TAG, "[Core 0] Background JPEG compressing & SD writing...");
+        ESP_LOGI(TAG, "[Core 0] Compressing frame (%dx%d) to JPEG...", fb->width, fb->height);
         uint8_t *jpg_buf = NULL;
         size_t jpg_len = 0;
-        bool converted = frame2jpg(fb, 85, &jpg_buf, &jpg_len);
 
+        bool converted = frame2jpg(fb, 85, &jpg_buf, &jpg_len);
         esp_camera_fb_return(fb);
 
         if(!converted || jpg_buf == NULL){
-            ESP_LOGE(TAG, "Background JPEG compression failed"); continue;
+            ESP_LOGE(TAG, "JPEG compression failed"); continue;
         }
 
         // writing into sdcard
@@ -286,6 +308,64 @@ static void photo_save_task(void *arg){
             ESP_LOGE(TAG, "Failed to save photo to SD card");
         } else {
             ESP_LOGI(TAG, "[Core 0] Photo saved to SD card successfully");
+        }
+    }
+}
+
+static QueueHandle_t s_video_queue = NULL;
+
+static void video_record_task(void *arg){
+    ESP_LOGI(TAG, "Video background recording task started on Core 0");
+    video_raw_frame_t frame;
+    while (true) {
+        // Chờ nhận frame từ Core 1
+        if (xQueueReceive(s_video_queue, &frame, portMAX_DELAY) != pdTRUE) continue;
+        
+        xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+        bool recording = s_camera.recording;
+
+        if (!recording) {
+            xSemaphoreGive(s_video_mutex);
+            free(frame.data);
+            continue;
+        }
+        
+        // 1. Tạo file video ở frame đầu tiên
+        if (s_camera.video == NULL) {
+            s_camera.video = storage_video_create(frame.width, frame.height, CAMERA_VIDEO_FPS);
+            if (s_camera.video == NULL) {
+                ESP_LOGE(TAG, "Cannot create video file on SD card (w=%lu, h=%lu)", 
+                         (unsigned long)frame.width, (unsigned long)frame.height);
+                s_camera.recording = false;
+                xSemaphoreGive(s_video_mutex);
+                free(frame.data);
+                continue;
+            }
+        }
+        xSemaphoreGive(s_video_mutex);
+        
+        // 2. Nén nhanh JPEG từ buffer 320x240 (chỉ mất ~18ms!)
+        camera_fb_t dummy_fb = {
+            .buf = frame.data,
+            .len = frame.len,
+            .width = frame.width,
+            .height = frame.height,
+            .format = PIXFORMAT_RGB565
+        };
+
+        uint8_t *jpg_buf = NULL;
+        size_t jpg_len = 0;
+        bool ok = frame2jpg(&dummy_fb, 60, &jpg_buf, &jpg_len);
+        free(frame.data); // Giải phóng ngay frame RGB thô
+        
+        if (ok && jpg_buf != NULL) {
+            // 3. Ghi vào container AVI an toàn
+            xSemaphoreTake(s_video_mutex, portMAX_DELAY);
+            if (s_camera.video != NULL && s_camera.recording) {
+                storage_video_write_frame(s_camera.video, jpg_buf, jpg_len);
+            }
+            xSemaphoreGive(s_video_mutex);
+            free(jpg_buf);
         }
     }
 }
@@ -301,12 +381,13 @@ static bool camera_is_recording(void)
 }
 
 static esp_err_t camera_start_video(void)
-{
+{   
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
     if(s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_OK;
     }
+
     s_camera.recording = true;
     s_camera.video = NULL;
     s_record_start_time = esp_timer_get_time(); // start record camera timer
@@ -318,17 +399,17 @@ static esp_err_t camera_start_video(void)
 
 static esp_err_t camera_stop_video(void)
 {
-    storage_video_t *video = NULL;
+    // storage_video_t *video = NULL;
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
     if(!s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_OK;
     }
+
     // stop accepting new frames
     s_camera.recording = false;
-    video = s_camera.video;
+    storage_video_t *video = s_camera.video;
     s_camera.video = NULL;
-
     xSemaphoreGive(s_video_mutex);
 
     // finalize avi
@@ -338,75 +419,49 @@ static esp_err_t camera_stop_video(void)
             ESP_LOGE(TAG, "Cannot finalize video");
             return ret;
         }
+        ESP_LOGI(TAG, ">>> Video finalized and saved successfully to SD card!");
     }
-    ESP_LOGI(TAG, "Stopped recording video");
+
     return ESP_OK;
 }
 
-static esp_err_t camera_record_frame(void)
+static esp_err_t camera_record_frame_from_fb(camera_fb_t *fb)
 {
+    if(fb == NULL) return ESP_ERR_INVALID_ARG;
+    
     // ktra trạng thái recording
     xSemaphoreTake(s_video_mutex, portMAX_DELAY);
     if(!s_camera.recording){
         xSemaphoreGive(s_video_mutex);
         return ESP_ERR_INVALID_STATE;
     }
-    xSemaphoreGive(s_video_mutex);
-
-    // lấy frame rgb565
-    camera_fb_t *fb = esp_camera_fb_get();
-    if(fb == NULL){
-        ESP_LOGE(TAG, "Failed to capture video frame");
-        return ESP_FAIL;
-    }
-
-    // hiển thị frame đang quay lên màn hình live view
-    // display_show_rgb565(fb->buf, 0, 0, fb->width, fb->height);
-
-    // nén frame sang jpeg để ghi vào container avi
-    uint8_t *jpg_buf = NULL;
-    size_t jpg_len = 0;
-    bool converted = frame2jpg(fb, 70, &jpg_buf, &jpg_len);
-    
-    uint32_t width = fb->width;
-    uint32_t height = fb->height;
-    esp_camera_fb_return(fb);
-
-    if(!converted || jpg_buf == NULL){
-        ESP_LOGI(TAG, "Video frame JPEG conversion failed");
-        return ESP_FAIL;
-    }
-
-    // protect video context while creating/writing frames
-    xSemaphoreTake(s_video_mutex, portMAX_DELAY);
-    if(!s_camera.recording){
-        xSemaphoreGive(s_video_mutex);
-        free(jpg_buf);
-        return ESP_ERR_INVALID_STATE;
-    }
    
     // first frame , create avi
     if(s_camera.video == NULL){
-        s_camera.video = storage_video_create(width, height, CAMERA_VIDEO_FPS);
+        s_camera.video = storage_video_create(fb->width, fb->height, CAMERA_VIDEO_FPS);
         if(s_camera.video == NULL){
-            ESP_LOGE(TAG, "Cannot create video file");
+            ESP_LOGE(TAG, "Cannot create video file on SDcard");
+            s_camera.recording = false;
             xSemaphoreGive(s_video_mutex);
-            free(jpg_buf);
             return ESP_FAIL;
         }
     }
 
-    // write jpeg frame into avi
-    esp_err_t ret = storage_video_write_frame(s_camera.video, jpg_buf, jpg_len);
-    xSemaphoreGive(s_video_mutex);
-    free(jpg_buf);
-
-    if(ret != ESP_OK){
-        ESP_LOGE(TAG, "cannot write video frame: %s", esp_err_to_name(ret));
-        return ret;
+    uint8_t *jpg_buf = NULL;
+    size_t jpg_len = 0;
+    bool ok = frame2jpg(fb, 55, &jpg_buf, &jpg_len);
+    if (!ok || jpg_buf == NULL) {
+        ESP_LOGE(TAG, "JPEG compression failed for video frame");
+        xSemaphoreGive(s_video_mutex);
+        return ESP_FAIL;
     }
 
-    return ESP_OK;
+    // write jpeg frame into avi
+    esp_err_t ret = storage_video_write_frame(s_camera.video, jpg_buf, jpg_len);
+    free(jpg_buf);
+
+    xSemaphoreGive(s_video_mutex);
+    return ret;
 }
 
 static void camera_capture_video(void)
@@ -424,31 +479,29 @@ static void camera_capture_video(void)
 static esp_err_t camera_driver_init(void)
 {
     esp_err_t ret = esp_camera_init(&s_camera_config);
+
     if(ret != ESP_OK){
         ESP_LOGE(TAG, "Camera init failed %s", esp_err_to_name(ret));
         return ret;
     }
 
     sensor_t *sensor = esp_camera_sensor_get();
-    if(sensor == NULL) {
-        ESP_LOGW(TAG, "Cannot get sensor");
-        return ESP_FAIL;
-    }
-    
-    // CẤU HÌNH BỘ XỬ LÝ ẢNH ISP OV3660 CHO MÀU SẮC CHÂN THỰC, SẮC NÉT
+    if(sensor == NULL) return ESP_FAIL;
+
+    // config ISP for OV3660
     sensor->set_vflip(sensor, 1);          // Đảo ảnh đúng chiều
     sensor->set_hmirror(sensor, 0);
     
     sensor->set_whitebal(sensor, 1);       // Bật Cân bằng trắng tự động (Auto White Balance)
     sensor->set_awb_gain(sensor, 1);       // Tăng cường AWB
-    sensor->set_wb_mode(sensor, 0);        // Chế độ AWB Auto
+    // sensor->set_wb_mode(sensor, 0);        // Chế độ AWB Auto
     
     sensor->set_exposure_ctrl(sensor, 1);  // Bật Phơi sáng tự động (Auto Exposure)
-    sensor->set_aec2(sensor, 1);           // Kích hoạt thuật toán AEC2 nâng cao
-    sensor->set_ae_level(sensor, 0);       // Mức bù sáng chuẩn
+    // sensor->set_aec2(sensor, 1);           // Kích hoạt thuật toán AEC2 nâng cao
+    // sensor->set_ae_level(sensor, 0);       // Mức bù sáng chuẩn
     
     sensor->set_gain_ctrl(sensor, 1);      // Tự động kiểm soát độ sáng khuếch đại (Auto Gain)
-    sensor->set_gainceiling(sensor, (gainceiling_t)2);
+    // sensor->set_gainceiling(sensor, (gainceiling_t)2);
     
     sensor->set_bpc(sensor, 1);            // Khử điểm ảnh chết màu đen
     sensor->set_wpc(sensor, 1);            // Khử điểm ảnh chết màu trắng
@@ -460,7 +513,7 @@ static esp_err_t camera_driver_init(void)
     sensor->set_contrast(sensor, 1);       // Tăng độ tương phản cho ảnh trong trẻo
     sensor->set_saturation(sensor, 1);     // Tăng độ đậm màu cho màu sắc tươi tắn
     ESP_LOGI(TAG, "Camera sensor OV3660 ISP configured");
-    vTaskDelay(pdMS_TO_TICKS(150));
+    vTaskDelay(pdMS_TO_TICKS(50));
 
     // Xả 2 frame khởi động
     for (int i = 0; i < 2; i++) {
@@ -494,101 +547,75 @@ static void camera_task(void *arg)
 static void liveview_task(void *arg){
     ESP_LOGI(TAG, "Real-time Liveview task started on Core 1");
     s_last_fps_calc_time = esp_timer_get_time();
-    s_last_rem_poll_time = esp_timer_get_time();
     s_cached_rem_photos = storage_get_remaining_photos();
+    int64_t last_video_frame_time = 0;
+    const int64_t video_frame_interval_us = 1000000 / CAMERA_VIDEO_FPS;
 
     while(true){
         // ktra mode hiện tại, nếu gallery hoặc chụp/ghi -> tạm dừng live
         if(mode_get() != APP_MODE_CAMERA || s_camera.capturing){
             // nếu đang quay video thì hiển thị thêm thông tin lên liveview để user biết, ko tạm dừng
-            vTaskDelay(pdMS_TO_TICKS(20));
-            continue;
+            vTaskDelay(pdMS_TO_TICKS(20)); continue;
         }
 
         // lấy frame từ camera
         camera_fb_t *fb = esp_camera_fb_get();
         if(fb != NULL){
+            if (fb->format == PIXFORMAT_RGB565) {
 
-            // 1. calculate fps every seconds
-            int64_t now = esp_timer_get_time();
-            s_fps_counter ++;
-            if(now - s_last_fps_calc_time >= 1000000){
-                s_real_fps = s_fps_counter;
-                s_fps_counter = 0;
-                s_last_fps_calc_time = now;
-            }
-            
-            // 2. update remain photos storage every 10 seconds
-            if(now - s_last_rem_poll_time >= 10000000){
-                s_cached_rem_photos = storage_get_remaining_photos();
-                s_last_rem_poll_time = now;
-            }
+                // 1. calculate fps every seconds
+                int64_t now = esp_timer_get_time();
+                s_fps_counter ++;
+                if(now - s_last_fps_calc_time >= 1000000){
+                    s_real_fps = s_fps_counter;
+                    s_fps_counter = 0;
+                    s_last_fps_calc_time = now;
+                }
 
-            // 3. calculate video timer
-            uint32_t record_sec = 0;
-            bool is_video = (s_camera.capture_mode == CAMERA_CAPTURE_VIDEO);
-            bool is_rec = s_camera.recording;
-            if(is_rec && s_record_start_time > 0){
-                record_sec = (uint32_t)((now - s_record_start_time)/1000000);
-            }
-            
-            // 4. Resize camera frame to lcd 320x240
-            if(fb->width == LCD_H_RES && fb->height == LCD_V_RES){
-                memcpy(s_live_lcd_buf, fb->buf, LCD_H_RES * LCD_V_RES * sizeof(uint16_t));
-            } else {
-                downsample_to_lcd((const uint16_t *)fb->buf, fb->width, fb->height, s_live_lcd_buf);
-            }
+                // 2. calculate video timer
+                uint32_t record_sec = 0;
+                bool is_video = (s_camera.capture_mode == CAMERA_CAPTURE_VIDEO);
+                bool is_rec = s_camera.recording;
+                if(is_rec && s_record_start_time > 0){
+                    record_sec = (uint32_t)((now - s_record_start_time)/1000000);
+                }
+                
+                // 3. Resize camera frame to lcd 320x240
+                if(fb->width == LCD_H_RES && fb->height == LCD_V_RES){
+                    memcpy(s_live_lcd_buf, fb->buf, LCD_H_RES * LCD_V_RES * sizeof(uint16_t));
+                } else if (s_live_lcd_buf != NULL){
+                    downsample_to_lcd((const uint16_t *)fb->buf, fb->width, fb->height, s_live_lcd_buf);
+                }
 
-            // 5. draw OSD into frame buffer
-            display_draw_osd_camera(s_live_lcd_buf, LCD_H_RES, LCD_V_RES, 
-                                    fb->width, fb->height, is_video, is_rec,
-                                    record_sec, s_real_fps, 1, s_cached_rem_photos, 80, 1);
-            
-            // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh // cẩn thận bị tràn khung ảnh -> core panic
-            display_show_rgb565(s_live_lcd_buf, 0,0, LCD_H_RES, LCD_V_RES);
+                if(is_rec && (now - last_video_frame_time >= video_frame_interval_us)){
+                    last_video_frame_time = now;
+                    size_t frame_bytes = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
+                    uint8_t *copy_buf = heap_caps_malloc(frame_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+                    if (copy_buf != NULL) {
+                        memcpy(copy_buf, s_live_lcd_buf, frame_bytes);
+                        video_raw_frame_t vframe = {
+                            .data = copy_buf,
+                            .len = frame_bytes,
+                            .width = LCD_H_RES,
+                            .height = LCD_V_RES
+                        };
+                        if (xQueueSend(s_video_queue, &vframe, 0) != pdPASS) {
+                            free(copy_buf); // Hàng đợi bận thì bỏ qua frame này, giữ Liveview mượt
+                        }
+                    }
+                }
+
+                // 5. draw OSD into frame buffer
+                display_draw_osd_camera(s_live_lcd_buf, LCD_H_RES, LCD_V_RES, 
+                                        fb->width, fb->height, is_video, is_rec,
+                                        record_sec, s_real_fps, 1, s_cached_rem_photos, 80, 1);
+                
+                // chỗ này vẫn chưa điểu chỉnh ảnh theo độ phân giải ảnh // cẩn thận bị tràn khung ảnh -> core panic
+                display_show_rgb565(s_live_lcd_buf, 0,0, LCD_H_RES, LCD_V_RES);
+            }
             esp_camera_fb_return(fb);
         }
-
-        vTaskDelay(pdMS_TO_TICKS(10)); // delay để giữ fps ổn định và nhường cho cpu
-    }
-}
-
-// video task (run on core 0)
-static void video_task(void *arg)
-{
-    ESP_LOGI(TAG, "Video task started on Core 0");
-    const TickType_t frame_period = pdMS_TO_TICKS(1000 / CAMERA_VIDEO_FPS);
-    bool was_recording = false;
-    TickType_t last_wake_time = xTaskGetTickCount();
-
-    while(true)
-    {   
-        bool recording = camera_is_recording();
-
-        // detect transist false -> true = start recordings
-        if(recording && !was_recording){
-            ESP_LOGI(TAG, "Video tasK: recording started");
-            last_wake_time = xTaskGetTickCount();
-        }
-
-        // detect transist true -> false = stop recording
-        if(!recording && was_recording){
-            ESP_LOGI(TAG," Video task: recording stopped");
-        }
-        was_recording = recording;
-
-        // not recording
-        if(!recording){
-            vTaskDelay(pdMS_TO_TICKS(20)); continue;
-        }
-
-        esp_err_t ret = camera_record_frame();
-        if(ret != ESP_OK){
-            ESP_LOGE(TAG,"Failed to record frame");
-            camera_stop_video(); continue;
-        }
-
-        vTaskDelayUntil(&last_wake_time, frame_period);
+        taskYIELD();
     }
 }
 
@@ -618,6 +645,12 @@ esp_err_t camera_init(void)
         return ESP_ERR_NO_MEM;
     }
 
+    s_video_queue = xQueueCreate(2, sizeof(video_raw_frame_t));
+    if(s_video_queue == NULL){
+        ESP_LOGE(TAG, "Cannot create save video queue");
+        return ESP_ERR_NO_MEM;
+    }
+
     s_subscriber = events_subscribe(EVENT_MASK_CAMERA, CAMERA_EVENT_QUEUE_LENGTH);
     if(s_subscriber == NULL) return ESP_FAIL;
 
@@ -627,7 +660,7 @@ esp_err_t camera_init(void)
 
 esp_err_t camera_start(void)
 {
-    // Core 1
+    // Core 1 = Producer
     if(s_camera_task == NULL){
         BaseType_t ret = xTaskCreatePinnedToCore(camera_task, 
                         "camera task", CAMERA_TASK_STACK_SIZE, NULL, 
@@ -640,23 +673,10 @@ esp_err_t camera_start(void)
         ESP_LOGI(TAG, "Camera task created");
     }
 
-    if(s_video_task == NULL){
-        BaseType_t ret = xTaskCreatePinnedToCore(video_task,
-                            "video task", CAMERA_TASK_STACK_SIZE, NULL, 
-                            CAMERA_TASK_PRIORITY, &s_video_task, 1);
-
-        if(ret != pdPASS) {
-            ESP_LOGE(TAG, "Cannot create video task"); 
-            return ESP_FAIL;
-        }
-        ESP_LOGI(TAG, "Video task created");
-    }
-
-    // Core 0
     if(s_liveview_task == NULL){
         BaseType_t ret = xTaskCreatePinnedToCore(liveview_task,
                             "liveview task", LIVEVIEW_TASK_STACK_SIZE, NULL,
-                            LIVEVIEW_TASK_PRIORITY, &s_liveview_task, 0);
+                            LIVEVIEW_TASK_PRIORITY, &s_liveview_task, 1);
         if(ret != pdPASS) {
             ESP_LOGE(TAG,"Cannot create liveview task"); 
             return ESP_FAIL;
@@ -664,6 +684,7 @@ esp_err_t camera_start(void)
         ESP_LOGI(TAG, "Liveview task created");
     }
 
+    // Core 0 = Consumer
     if(s_save_task == NULL){
         BaseType_t ret = xTaskCreatePinnedToCore(photo_save_task, 
                             "save photo task", SAVE_TASK_STACK_SIZE, NULL, 
@@ -673,6 +694,10 @@ esp_err_t camera_start(void)
             ESP_LOGE(TAG, "Cannot create save task"); 
             return ESP_FAIL;
         }
+    }
+
+    if (s_video_record_task == NULL) {
+        xTaskCreatePinnedToCore(video_record_task, "video record task", 4096, NULL, 4, &s_video_record_task, 0); // Chạy trên Core 0
     }
 
     ESP_LOGI(TAG, "Camera tasks pinned to core 0 and 1 successfully.");

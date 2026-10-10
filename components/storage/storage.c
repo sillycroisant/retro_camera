@@ -36,6 +36,8 @@ static sdmmc_card_t *card = NULL;
 static uint32_t current_index = 1;
 static uint32_t image_count = 0;
 
+uint32_t s_cached_rem_photos = 0;
+
 static char latest_path[128] = "";
 static char latest_filename[32] = "";
 
@@ -71,38 +73,38 @@ struct storage_video
 };
 
 //functions
-static void storage_scan_directory(void)
-{
-    DIR *dir = opendir(PHOTO_DIRECTORY);
+// static void storage_scan_directory(void)
+// {
+//     DIR *dir = opendir(PHOTO_DIRECTORY);
 
-    if (dir == NULL){
-        ESP_LOGW(TAG, "Cannot open photos directory.");
-        current_index = 1;
-        image_count = 0;
-        return;
-    }
+//     if (dir == NULL){
+//         ESP_LOGW(TAG, "Cannot open photos directory.");
+//         current_index = 1;
+//         image_count = 0;
+//         return;
+//     }
 
-    struct dirent *entry;
-    uint32_t max_index = 0;
+//     struct dirent *entry;
+//     uint32_t max_index = 0;
 
-    while((entry = readdir(dir)) != NULL)
-    {
-        uint32_t index;
+//     while((entry = readdir(dir)) != NULL)
+//     {
+//         uint32_t index;
 
-        if(sscanf(entry->d_name, "photo_%lu.jpg", &index) == 1)
-        {
-            image_count++;
+//         if(sscanf(entry->d_name, "photo_%lu.jpg", &index) == 1)
+//         {
+//             image_count++;
 
-            if(index > max_index) {
-                max_index = index; 
-            }
-        }
-    }
+//             if(index > max_index) {
+//                 max_index = index; 
+//             }
+//         }
+//     }
     
-    closedir(dir);
-    current_index = max_index + 1;
-    ESP_LOGI(TAG, "Found %lu photos", (unsigned long)image_count);
-}
+//     closedir(dir);
+//     current_index = max_index + 1;
+//     ESP_LOGI(TAG, "Found %lu photos", (unsigned long)image_count);
+// }
 
 
 static bool storage_load_index(void)
@@ -234,10 +236,13 @@ esp_err_t storage_init(void){
     // check photos folder and create if not exist yet
     struct stat st;
 
-    if(stat(PHOTO_DIRECTORY, &st) != 0)
-    {
+    if(stat(PHOTO_DIRECTORY, &st) != 0){
         mkdir(PHOTO_DIRECTORY, 0775);
         ESP_LOGI(TAG, "Created /photos.");
+    }
+    if(stat(VIDEO_DIRECTORY, &st) != 0){
+        mkdir(VIDEO_DIRECTORY, 0775);
+        ESP_LOGI(TAG, "Created /videos");
     }
 
     //
@@ -643,14 +648,11 @@ storage_video_t *storage_video_create(
             VIDEO_DIRECTORY "/video_%06lu.avi",
             (unsigned long)i
         );
-
+        // Nếu stat trả về khác 0 nghĩa là file chưa tồn tại -> dùng tên file này!
         if (stat(video->path, &st) != 0)
         {
-            if (errno == ENOENT)
-            {
-                found = true;
-                break;
-            }
+            found = true;
+            break;
         }
     }
 
@@ -717,14 +719,10 @@ esp_err_t storage_video_write_frame(
 
     if (fwrite(data, 1, len, f) != len) return ESP_FAIL;
 
-    /*
-     * AVI chunks must be WORD aligned.
-     */
-
+    // AVI chunks must be WORD aligned.
     if (len & 1)
     {
         uint8_t padding = 0;
-
         if (fwrite(&padding, 1, 1, f) != 1) return ESP_FAIL;
     }
 
@@ -763,7 +761,6 @@ esp_err_t storage_video_close(storage_video_t *video)
     }
 
     // Write idx1
-
     storage_write_fourcc(f, "idx1");
 
     uint32_t index_size =
@@ -778,9 +775,7 @@ esp_err_t storage_video_close(storage_video_t *video)
         uint32_t flags = 0x10;
 
         storage_write_u32(f, flags);
-
         storage_write_u32(f, video->index[i].offset);
-
         storage_write_u32(f, video->index[i].size);
     }
 
@@ -798,8 +793,7 @@ esp_err_t storage_video_close(storage_video_t *video)
     // RIFF size = file size - 8
     uint32_t riff_size = (uint32_t)(file_end - 8);
 
-    // movi LIST size
-    // Includes "movi" + all chunks.
+    // movi LIST size    // Includes "movi" + all chunks.
     uint32_t movi_size = 
         (uint32_t)(movi_end - (video->movi_list_offset + 8));
 
@@ -809,15 +803,13 @@ esp_err_t storage_video_close(storage_video_t *video)
     fwrite(&riff_size, sizeof(riff_size), 1, f);
 
 
-    // Patch total frame count in avih
-    // Offset 48
+    // Patch total frame count in avih // Offset 48
     fseek(f, 48, SEEK_SET);
 
     fwrite(&video->frame_count, sizeof(video->frame_count), 1, f);
 
 
-    // Patch stream frame count
-    // Offset 140
+    // Patch stream frame count // Offset 140
     fseek(f, 140, SEEK_SET);
     fwrite(&video->frame_count, sizeof(video->frame_count), 1, f);
 

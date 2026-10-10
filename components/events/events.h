@@ -36,12 +36,11 @@ typedef enum
 // gallery events
 typedef enum
 {
-    GALLERY_EVENT_DUMMY = 0,
+    GALLERY_EVENT_DELETE = 0,
     GALLERY_EVENT_SCROLL_FORWARD,
     GALLERY_EVENT_SCROLL_BACK,
     GALLERY_EVENT_OPEN_CAMERA,
-    GALLERY_EVENT_COUNT
-    
+    GALLERY_EVENT_COUNT 
 } gallery_event_type_t;
 
 #define EVENT_MASK_CAMERA   (1UL << EVENT_CHANNEL_CAMERA)

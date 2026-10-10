@@ -126,8 +126,8 @@ static bool input_translate(button_id_t button, event_t *event)
             switch (button)
             {
                 case BUTTON_ID_1:
-                    event->type.gallery = GALLERY_EVENT_DUMMY;
-                    ESP_LOGI(TAG, "[Btn 1 - GPIO 1] Event: DUMMY EVENT");
+                    event->type.gallery = GALLERY_EVENT_DELETE;
+                    ESP_LOGI(TAG, "[Btn 1 - GPIO 1] Event: DELETE PHOTO");
                     break;
 
                 case BUTTON_ID_2:
