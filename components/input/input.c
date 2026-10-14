@@ -97,17 +97,19 @@ static bool input_translate(button_id_t button, event_t *event)
             {
                 case BUTTON_ID_1:
                     event->type.camera = CAMERA_EVENT_CAPTURE;
-                    ESP_LOGI(TAG, "[Btn1 - GPIO 1] Event: CAPTURE/ RECORD");
+                    ESP_LOGI(TAG, "[Btn1 - GPIO 1] Event: CAPTURE");
                     break;
 
                 case BUTTON_ID_2:
-                    event->type.camera = CAMERA_EVENT_FLASH_TOGGLE;
-                    ESP_LOGI(TAG, "[Btn2 - GPIO 2] Event: TOGGLE FLASH");
+                    event->type.camera = CAMERA_EVENT_CHANGE_FILTER;
+                    ESP_LOGI(TAG, "[Btn2 - GPIO 2] Event: CHANGE FILTER");
                     break;
                     
                 case BUTTON_ID_3:
-                    event->type.camera = CAMERA_EVENT_TOGGLE_VIDEO;
-                    ESP_LOGI(TAG, "[Btn3 - GPIO 3] Event: TOGGLE PHOTO/VIDEO");
+                    // event->type.camera = CAMERA_EVENT_TOGGLE_VIDEO;
+                    event->type.camera = CAMERA_EVENT_OPEN_SETTING;
+
+                    ESP_LOGI(TAG, "[Btn3 - GPIO 3] Event: OPEN SETTING");
                     break;
 
                 case BUTTON_ID_4:

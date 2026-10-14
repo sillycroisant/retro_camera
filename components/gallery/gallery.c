@@ -30,6 +30,7 @@ void gallery_display_current_photo(void)
 
     if(s_current_photo_idx == 0){
         ESP_LOGI(TAG, "No photos found on SD card");
+        mode_set(APP_MODE_CAMERA); // nếu ko còn ảnh trong thẻ thì về màn hình chính
         return;
     }
 
@@ -54,12 +55,12 @@ static void gallery_handle_scroll_previous(void)
 {
     ESP_LOGI(TAG, "Gallery: Scroll UP (Next item in gallery)");
     
-    if(s_current_photo_idx > 1){
+    if(s_current_photo_idx >= 1){
         s_current_photo_idx --;
         char path[128];
 
         // Bỏ qua các index file bị xóa hoặc không tồn tại
-        while(s_current_photo_idx > 1 && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
+        while(s_current_photo_idx >= 1 && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
             s_current_photo_idx--;
         }
     } else {
@@ -77,11 +78,11 @@ static void gallery_handle_scroll_next(void)
     ESP_LOGI(TAG, "Gallery: Scroll DOWN (Next item)");
 
     uint32_t max_idx = storage_get_current_index();
-    if (s_current_photo_idx < max_idx){
+    if (s_current_photo_idx <= max_idx){
         s_current_photo_idx ++;
         // keep scroll next to look for a valid photo
         char path[128];
-        while(s_current_photo_idx < max_idx && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
+        while(s_current_photo_idx <= max_idx && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
             s_current_photo_idx++;
         }
     } else {
@@ -98,7 +99,7 @@ static void gallery_handle_delete_photo(void){
     esp_err_t ret = storage_delete_photo(s_current_photo_idx);
 
     if(ret == ESP_OK) {
-        gallery_handle_scroll_next();
+        gallery_handle_scroll_previous();
         s_cached_rem_photos = storage_get_remaining_photos();
     } else {
         ESP_LOGE(TAG, "Failed to delete photo");

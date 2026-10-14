@@ -43,15 +43,12 @@ static char latest_filename[32] = "";
 
 static storage_index_t g_index;
 
-typedef struct __attribute__((packed))
-{
+typedef struct __attribute__((packed)){
     uint32_t offset;
     uint32_t size;
-
 } avi_index_entry_t;
 
-struct storage_video
-{
+struct storage_video{
     FILE *file;
 
     uint32_t width;
@@ -111,15 +108,9 @@ static bool storage_load_index(void)
 {
     FILE *fp = fopen(INDEX_FILE, "rb");
 
-    if (fp == NULL){
-        return false;
-    }
+    if (fp == NULL) return false;
 
-    size_t n = fread(
-        &g_index,
-        sizeof(g_index),
-        1, fp
-    );
+    size_t n = fread(&g_index, sizeof(g_index), 1, fp);
 
     fclose(fp);
     return (n == 1);
@@ -130,22 +121,19 @@ static void storage_save_index(void)
 {
     FILE *fp = fopen(INDEX_FILE, "wb");
 
+    // nếu ko đọc được file index thì tạo mới file index.bat
     if (fp == NULL) {
-        ESP_LOGE(TAG, "Cannot write index.dat");
-        return;
+        ESP_LOGE(TAG, "Cannot write index.dat, creating index.bat file in SD card ...");
+        // tạo file index.dat và thử đọc lại file có được ko nếu được thì ghi file
     }
 
-    fwrite(
-        &g_index,
-        sizeof(g_index),
-        1, fp
-    );
-
+    fwrite(&g_index, sizeof(g_index), 1, fp);
     fclose(fp);
 }
 
 esp_err_t storage_rescan(void){
     DIR *dir = opendir(PHOTO_DIRECTORY);
+    
     if(dir == NULL){
         ESP_LOGI(TAG, "Cannot open photos directory for rescan");
         current_index = 1;
@@ -162,24 +150,25 @@ esp_err_t storage_rescan(void){
 
     while((entry = readdir(dir)) != NULL){
         uint32_t index = 0;
-        if(sscanf(entry->d_name, "photo_%lu.jpg", &index) == 1) {
+        if(sscanf(entry->d_name, "PIC%04lu.jpg", &index) == 1) {
             count ++;\
             if(index > max_index) {
                 max_index = index;
             }
         }
     }
+
     closedir(dir);
     image_count = count;
     current_index = max_index + 1;
     if(max_index > 0){
-        snprintf(latest_filename, sizeof(latest_filename), "photo_%06lu.jpg", (unsigned long)max_index);
+        snprintf(latest_filename, sizeof(latest_filename), "PIC%04lu.jpg", (unsigned long)max_index);
         snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
         
         // Kiểm tra xem file có tồn tại theo định dạng 6 chữ số không, nếu không thử định dạng cũ
         struct stat st;
         if (stat(latest_path, &st) != 0) {
-            snprintf(latest_filename, sizeof(latest_filename), "photo_%lu.jpg", (unsigned long)max_index);
+            snprintf(latest_filename, sizeof(latest_filename), "PIC%04lu.jpg", (unsigned long)max_index);
             snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
         }
     } else {
@@ -276,7 +265,7 @@ esp_err_t storage_init(void){
     // find and return latest image filename
     if(image_count > 0 && current_index > 1){
         uint32_t last_idx = current_index - 1;
-        snprintf(latest_filename, sizeof(latest_filename), "photo_%06lu.jpg", (unsigned long)last_idx);
+        snprintf(latest_filename, sizeof(latest_filename), "PIC%04lu.jpg", (unsigned long)last_idx);
         snprintf(latest_path, sizeof(latest_path), "%s/%s", PHOTO_DIRECTORY, latest_filename);
         ESP_LOGI(TAG, "Latest photo found: %s", latest_path);
     }
@@ -292,7 +281,7 @@ esp_err_t storage_save_jpeg(
     snprintf(
         latest_filename,
         sizeof(latest_filename),
-        "photo_%06lu.jpg",
+        "PIC%04lu.jpg",
         (unsigned long)current_index        
     );
 
@@ -864,7 +853,7 @@ esp_err_t storage_get_path_by_index(uint32_t index, char *out_path, size_t max_l
         return ESP_ERR_INVALID_ARG;
     }
 
-    snprintf(out_path, max_len, "%s/photo_%06lu.jpg", PHOTO_DIRECTORY, (unsigned long)index);
+    snprintf(out_path, max_len, "%s/PIC%04lu.jpg", PHOTO_DIRECTORY, (unsigned long)index);
     struct stat st;
     if(stat(out_path, &st) == 0){
         return ESP_OK;

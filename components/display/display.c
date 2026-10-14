@@ -227,9 +227,8 @@ void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h,
     display_draw_string(buf, buf_w, buf_h, 8, buf_h - 16, res_str, COLOR_WHITE, true);
 }
 
-void display_draw_osd_gallery(uint16_t *buf, int buf_w,
-                                int img_w, int img_h,
-                                int buf_h, uint32_t current_idx, uint32_t total_count)
+void display_draw_osd_gallery(uint16_t *buf, int buf_w, int buf_h,
+                                int img_w, int img_h, uint32_t current_idx, uint32_t total_count)
 {
     if (buf == NULL) return;
 
@@ -238,15 +237,17 @@ void display_draw_osd_gallery(uint16_t *buf, int buf_w,
 
     // Right header
     char idx_str[24];
+    // thay cái current_index bằng current file_path
     snprintf(idx_str, sizeof(idx_str), "%lu/%lu", (unsigned long)current_idx, (unsigned long)total_count);
+
     int idx_x = buf_w - (int)strlen(idx_str) * 8 - 8;
     display_draw_string(buf, buf_w, buf_h, idx_x, 8, idx_str, COLOR_WHITE, true);
 
     // Footer: Hướng dẫn nút
     char res_str[24];
-    snprintf(res_str, sizeof(res_str), "%dx%d", img_h, img_w);
-    display_draw_string(buf, buf_w, buf_h, 8, buf_h - 30, res_str, COLOR_WHITE, true);
-    display_draw_string(buf, buf_w, buf_h, 8, buf_h - 16, "B1:DEL  B2:PREV  B3:NEXT  B4:CAM", COLOR_WHITE, true);
+    snprintf(res_str, sizeof(res_str), "%dx%d", img_w, img_h);
+    display_draw_string(buf, buf_w, buf_h, 8, 208, res_str, COLOR_WHITE, true);
+    display_draw_string(buf, buf_w, buf_h, 8, 224, "B1:DEL  B2:PREV  B3:NEXT  B4:CAM", COLOR_WHITE, true);
 }
 
 // Hàm đọc kích thước ảnh gốc từ file JPEG Header
@@ -285,6 +286,7 @@ static void resize_rgb565_image(const uint16_t *src, int src_w, int src_h,
         }
     }
 }
+
 esp_err_t display_show_jpeg_file(const char *file_path)
 {
     if (s_panel_handle == NULL || file_path == NULL) return ESP_ERR_INVALID_ARG;
@@ -311,7 +313,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         ESP_LOGE(TAG, "Invalid JPEG format: %s", file_path);
         return ESP_FAIL;
     }
-    
+        
     // 2. Chọn Scale phần cứng phù hợp nhất để tiết kiệm RAM
     esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
     uint16_t dec_w = img_w;
@@ -325,6 +327,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         dec_w = img_w / 2;
         dec_h = img_h / 2;
     }
+
     // 3. Cấp phát buffer giải nén JPEG
     size_t dec_size = (size_t)dec_w * dec_h * sizeof(uint16_t);
     uint16_t *dec_buf = heap_caps_malloc(dec_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -339,6 +342,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         ESP_LOGE(TAG, "Failed to decode JPEG image");
         return ESP_FAIL;
     }
+
     // 4. Cấp phát buffer toàn màn hình chuẩn 320x240
     size_t full_size = LCD_H_RES * LCD_V_RES * sizeof(uint16_t);
     uint16_t *full_buf = heap_caps_malloc(full_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -346,8 +350,10 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         free(dec_buf);
         return ESP_ERR_NO_MEM;
     }
+    
     // Xóa nền đen toàn khung
     memset(full_buf, 0, full_size);
+
     // 5. Nếu ảnh khớp 320x240 thì copy trực tiếp, nếu khác thì Resize vừa khít 320x240
     if (dec_w == LCD_H_RES && dec_h == LCD_V_RES) {
         memcpy(full_buf, dec_buf, full_size);
@@ -355,13 +361,16 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         resize_rgb565_image(dec_buf, dec_w, dec_h, full_buf, LCD_H_RES, LCD_V_RES);
     }
     free(dec_buf);
+
     // 6. Lấy index ảnh và vẽ OSD Gallery lên buffer 320x240
     uint32_t current_idx = 0;
     const char *pname = strrchr(file_path, '/');
     if (pname != NULL) {
-        sscanf(pname + 1, "photo_%lu.jpg", &current_idx);
+        sscanf(pname + 1, "PIC%04lu.jpg", &current_idx);
     }
+    
     display_draw_osd_gallery(full_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, current_idx, storage_image_count());
+
     // 7. Xuất ra LCD ST7789 với kích thước chuẩn 320x240
     esp_err_t ret = display_show_rgb565(full_buf, 0, 0, LCD_H_RES, LCD_V_RES);
     free(full_buf);
