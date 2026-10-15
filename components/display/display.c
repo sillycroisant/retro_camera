@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "esp_heap_caps.h"
 
+#include "driver/ledc.h"
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 #include "esp_lcd_panel_io.h"
@@ -26,13 +27,63 @@
 #define LCD_PIN_CS       GPIO_NUM_45
 #define LCD_PIN_DC       GPIO_NUM_48
 #define LCD_PIN_RST      GPIO_NUM_47
-#define LCD_PIN_BK_LIGHT -1            // chân BK light mặc định 3v3
+#define LCD_PIN_BK_LIGHT GPIO_NUM_1
+#define LCD_BK_LEDC_TIMER   LEDC_TIMER_1
+#define LCD_BK_LEDC_CHANNEL LEDC_CHANNEL_1
 
 #define LCD_SPI_HOST     SPI2_HOST
 #define LCD_CHUNK_LINES  120
 
 static esp_lcd_panel_handle_t s_panel_handle = NULL;
 static SemaphoreHandle_t s_display_mutex = NULL;
+static uint8_t s_current_brightness = 80;
+
+static esp_err_t display_backlight_init(void){
+    if (LCD_PIN_BK_LIGHT < 0) return ESP_OK;
+
+    ESP_LOGI(TAG, "Initializing LCD backlight PWN on GPIO %d - 5khz, 10-bit..", LCD_PIN_BK_LIGHT);
+
+    // 1. Cấu hình Timer PWM (Timer 1, 5kHz, 10-bit)
+    ledc_timer_config_t timer_conf = {
+        .speed_mode       = LEDC_LOW_SPEED_MODE,
+        .timer_num        = LCD_BK_LEDC_TIMER,
+        .duty_resolution  = LEDC_TIMER_10_BIT, // 0 - 1023
+        .freq_hz          = 5000,              // 5kHz
+        .clk_cfg          = LEDC_AUTO_CLK
+    };
+    ESP_ERROR_CHECK(ledc_timer_config(&timer_conf));
+    // 2. Cấu hình Channel PWM gắn với chân GPIO 1
+    ledc_channel_config_t channel_conf = {
+        .speed_mode     = LEDC_LOW_SPEED_MODE,
+        .channel        = LCD_BK_LEDC_CHANNEL,
+        .timer_sel      = LCD_BK_LEDC_TIMER,
+        .intr_type      = LEDC_INTR_DISABLE,
+        .gpio_num       = LCD_PIN_BK_LIGHT,
+        .duty           = 0, // Khởi tạo ban đầu tắt để tránh chớp
+        .hpoint         = 0
+    };
+    ESP_ERROR_CHECK(ledc_channel_config(&channel_conf));
+    return ESP_OK;
+}
+
+esp_err_t display_set_brightness(uint8_t percent){
+    if(LCD_PIN_BK_LIGHT < 0) return ESP_OK;
+    if(percent > 100) percent = 100;
+
+    s_current_brightness = percent;
+
+    uint32_t duty = (uint32_t)((percent * 1023) / 100);
+
+    esp_err_t ret = ledc_set_duty(LEDC_LOW_SPEED_MODE, LCD_BK_LEDC_CHANNEL, duty);
+    if(ret == ESP_OK){
+        ret = ledc_update_duty(LEDC_LOW_SPEED_MODE, LCD_BK_LEDC_CHANNEL);
+    }
+    return ret;
+}
+
+uint8_t display_get_brightness(void){
+    return s_current_brightness;
+}
 
 esp_err_t display_init(void)
 {
@@ -84,6 +135,11 @@ esp_err_t display_init(void)
     // create mutex to protect display SPI
     if (s_display_mutex == NULL) {
         s_display_mutex = xSemaphoreCreateMutex();
+    }
+
+    if(LCD_PIN_BK_LIGHT >= 0) {
+        display_backlight_init();
+        display_set_brightness(50);
     }
 
     ESP_LOGI(TAG, "ST7789 LCD Display initialized (320x240)");

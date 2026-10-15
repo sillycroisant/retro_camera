@@ -19,7 +19,7 @@
 #define INPUT_QUEUE_SIZE        5
 #define INPUT_TASK_STACK_SIZE   4096
 #define INPUT_TASK_PRIORITY     5
-#define INPUT_DEBOUNCE_MS       200000
+#define INPUT_DEBOUNCE_MS       100000
 
 #define GPIO_BUTTON_ID_1 GPIO_NUM_0 // dùng nút boot có sẵn trên bo mạch
 #define GPIO_BUTTON_ID_2 GPIO_NUM_3 
@@ -127,10 +127,37 @@ static bool input_translate(button_id_t button, event_t *event)
 
             switch (button)
             {
-                case BUTTON_ID_1:
+                case BUTTON_ID_1: // tạm, nhấn giữ 1 giây, nhả nút ra thì xóa ảnh
+                {
+                    const int required_hold_ms = 1500;
+                    const int check_step_ms = 100;
+                    int held_ms = 0;
+                    gpio_num_t pin = s_buttons[BUTTON_ID_1].gpio;
+
+                    ESP_LOGI(TAG, "Holding button 1 ...");
+
+                    // checking holding time loop
+                    while(gpio_get_level(pin) == 0){
+                        vTaskDelay(pdMS_TO_TICKS(check_step_ms));
+                        held_ms += check_step_ms;
+                        if(held_ms >= required_hold_ms) break;
+                    }
+
+                    // abort action if release before required time 
+                    if(held_ms < required_hold_ms){
+                        ESP_LOGW(TAG, "[Btn1 - Gallery] Nha nut som (%d ms < %d ms) -> HUY XOA ANH", held_ms, required_hold_ms);
+                        return false;
+                    } // có thể xóa phần này để thao tác xóa ảnh mượt hơn
+
+                    // wait for user to stop holding button, to not delete multiple images
+                    while(gpio_get_level(pin) == 0) vTaskDelay(pdMS_TO_TICKS(check_step_ms));
+
+                    // update the last time button was pressed to debounced
+                    s_last_isr_time[BUTTON_ID_1] = esp_timer_get_time();
                     event->type.gallery = GALLERY_EVENT_DELETE;
-                    ESP_LOGI(TAG, "[Btn 1 - GPIO 1] Event: DELETE PHOTO");
-                    break;
+                    ESP_LOGI(TAG, "[Btn 1 - GPIO 1] Event: DELETE PHOTO >> Confirm delete photo action");
+                    return true;
+                }
 
                 case BUTTON_ID_2:
                     event->type.gallery = GALLERY_EVENT_SCROLL_FORWARD;

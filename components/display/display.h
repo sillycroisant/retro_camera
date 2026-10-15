@@ -56,6 +56,10 @@ esp_err_t display_clear(uint16_t color);
 
 void display_show_splash_screen(const char *title, const char *subtitle, const char *author);
 
+esp_err_t display_set_brightness(uint8_t percent);
+
+uint8_t display_get_brightness(void);
+
 #ifdef __cplusplus
 }
 #endif
