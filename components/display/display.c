@@ -284,20 +284,21 @@ void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h,
 }
 
 void display_draw_osd_gallery(uint16_t *buf, int buf_w, int buf_h,
-                                int img_w, int img_h, uint32_t current_idx, uint32_t total_count)
+                                int img_w, int img_h, 
+                                const char *filename, uint32_t current_pos_1based, uint32_t total_count)
 {
     if (buf == NULL) return;
 
     // Left header
     display_draw_string(buf, buf_w, buf_h, 8, 8, "GALLERY", COLOR_WHITE, true);
+    display_draw_string(buf, buf_w, buf_h, 8, 24, filename, COLOR_WHITE, true);
 
     // Right header
-    char idx_str[24];
-    // thay cái current_index bằng current file_path
-    snprintf(idx_str, sizeof(idx_str), "%lu/%lu", (unsigned long)current_idx, (unsigned long)total_count);
+    char count_str[24];
+    snprintf(count_str, sizeof(count_str), "%lu/%lu", (unsigned long)current_pos_1based, (unsigned long)total_count);
 
-    int idx_x = buf_w - (int)strlen(idx_str) * 8 - 8;
-    display_draw_string(buf, buf_w, buf_h, idx_x, 8, idx_str, COLOR_WHITE, true);
+    int count_x = buf_w - (int)strlen(count_str) * 8 - 8;
+    display_draw_string(buf, buf_w, buf_h, count_x, 8, count_str, COLOR_WHITE, true);
 
     // Footer: Hướng dẫn nút
     char res_str[24];
@@ -343,7 +344,8 @@ static void resize_rgb565_image(const uint16_t *src, int src_w, int src_h,
     }
 }
 
-esp_err_t display_show_jpeg_file(const char *file_path)
+esp_err_t display_show_gallery_photo(const char *file_path, const char *filename, 
+                                     uint32_t current_pos_1based, uint32_t total_count)
 {
     if (s_panel_handle == NULL || file_path == NULL) return ESP_ERR_INVALID_ARG;
     FILE *fp = fopen(file_path, "rb");
@@ -351,6 +353,7 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         ESP_LOGE(TAG, "Cannot open image: %s", file_path);
         return ESP_ERR_NOT_FOUND;
     }
+
     fseek(fp, 0, SEEK_END);
     size_t file_size = ftell(fp);
     rewind(fp);
@@ -366,10 +369,9 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     uint16_t img_w = 0, img_h = 0;
     if (!get_jpeg_resolution(jpg_buf, file_size, &img_w, &img_h)) {
         free(jpg_buf);
-        ESP_LOGE(TAG, "Invalid JPEG format: %s", file_path);
         return ESP_FAIL;
     }
-        
+    
     // 2. Chọn Scale phần cứng phù hợp nhất để tiết kiệm RAM
     esp_jpeg_image_scale_t scale = JPEG_IMAGE_SCALE_0;
     uint16_t dec_w = img_w;
@@ -383,7 +385,6 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         dec_w = img_w / 2;
         dec_h = img_h / 2;
     }
-
     // 3. Cấp phát buffer giải nén JPEG
     size_t dec_size = (size_t)dec_w * dec_h * sizeof(uint16_t);
     uint16_t *dec_buf = heap_caps_malloc(dec_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -395,8 +396,14 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     free(jpg_buf);
     if (!ok) {
         free(dec_buf);
-        ESP_LOGE(TAG, "Failed to decode JPEG image");
         return ESP_FAIL;
+    }
+
+    // đảo thứ tự byte decode buffer để tương thích với LCD // Endianness mismatch error
+    //     // lcd st7789 expected thứ tự Big endian qua SPI nhưng decode buffer từ hàm jpg2rgb565 trả về Little endian nên cần đảo bit lại
+    size_t pixel_count = (size_t)dec_w * dec_h;
+    for (size_t i = 0; i < pixel_count; i++) {
+        dec_buf[i] = __builtin_bswap16(dec_buf[i]);
     }
 
     // 4. Cấp phát buffer toàn màn hình chuẩn 320x240
@@ -406,11 +413,9 @@ esp_err_t display_show_jpeg_file(const char *file_path)
         free(dec_buf);
         return ESP_ERR_NO_MEM;
     }
-    
     // Xóa nền đen toàn khung
     memset(full_buf, 0, full_size);
 
-    // 5. Nếu ảnh khớp 320x240 thì copy trực tiếp, nếu khác thì Resize vừa khít 320x240
     if (dec_w == LCD_H_RES && dec_h == LCD_V_RES) {
         memcpy(full_buf, dec_buf, full_size);
     } else {
@@ -418,14 +423,9 @@ esp_err_t display_show_jpeg_file(const char *file_path)
     }
     free(dec_buf);
 
-    // 6. Lấy index ảnh và vẽ OSD Gallery lên buffer 320x240
-    uint32_t current_idx = 0;
-    const char *pname = strrchr(file_path, '/');
-    if (pname != NULL) {
-        sscanf(pname + 1, "PIC%04lu.jpg", &current_idx);
-    }
-    
-    display_draw_osd_gallery(full_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, current_idx, storage_image_count());
+    // Vẽ OSD Gallery mới
+    display_draw_osd_gallery(full_buf, LCD_H_RES, LCD_V_RES, img_w, img_h, 
+                             filename, current_pos_1based, total_count);
 
     // 7. Xuất ra LCD ST7789 với kích thước chuẩn 320x240
     esp_err_t ret = display_show_rgb565(full_buf, 0, 0, LCD_H_RES, LCD_V_RES);
@@ -437,12 +437,12 @@ esp_err_t display_show_jpeg_file(const char *file_path)
 esp_err_t display_show_latest_photo(void)
 {
     const char *path = storage_latest_path();
-    if (path == NULL || strlen(path) == 0) {
-        ESP_LOGW(TAG, "No photo in storage to display");
-        return ESP_ERR_NOT_FOUND;
-    }
+    if (path == NULL || strlen(path) == 0) return ESP_ERR_NOT_FOUND;
 
-    return display_show_jpeg_file(path);
+    uint32_t total = storage_gallery_get_count();
+    const char *fname = storage_latest_filename();
+
+    return display_show_gallery_photo(path, fname, total, total);
 }
 
 void display_show_splash_screen(const char *title, const char *subtitle, const char *author){

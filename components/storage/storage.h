@@ -112,6 +112,18 @@ esp_err_t storage_delete_photo(uint32_t index);
  */
 uint32_t storage_get_remaining_photos(void);
 
+esp_err_t storage_gallery_refresh(void);
+
+uint32_t storage_gallery_get_count(void);
+
+esp_err_t storage_gallery_get_filename(uint32_t pos, char *out_filename, size_t max_len);
+
+// get photo full path directory
+esp_err_t storage_gallery_get_path(uint32_t pos, char *out_path, size_t max_len);
+
+// delete photo based on position
+esp_err_t storage_gallery_delete(uint32_t pos);
+
 #ifdef __cplusplus
 }
 #endif

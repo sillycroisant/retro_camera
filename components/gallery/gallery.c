@@ -19,27 +19,29 @@ typedef void (*gallery_handler_t)(void);
 
 static TaskHandle_t s_gallery_task = NULL;
 static event_subscriber_t *s_subscriber = NULL;
-static uint32_t s_current_photo_idx = 0;
+static int32_t s_current_pos = -1;
 
 // display current photo in gallery
 void gallery_display_current_photo(void)
 {
     if(mode_get() != APP_MODE_GALLERY) return;
 
-    if(s_current_photo_idx == 0) s_current_photo_idx = storage_get_current_index();
-
-    if(s_current_photo_idx == 0){
+    uint32_t total = storage_gallery_get_count();
+    if(total == 0){
         ESP_LOGI(TAG, "No photos found on SD card");
-        mode_set(APP_MODE_CAMERA); // nếu ko còn ảnh trong thẻ thì về màn hình chính
+        mode_set(APP_MODE_CAMERA);
         return;
     }
 
+    if(s_current_pos < 0 || (uint32_t)s_current_pos >= total){
+        s_current_pos = total - 1;
+    }
+
     char path[128];
-    if(storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) == ESP_OK){
-        ESP_LOGI(TAG, "Gallery viewing [%lu]: %s", (unsigned long)s_current_photo_idx, path);
-        display_show_jpeg_file(path);
-    } else {
-        ESP_LOGW(TAG, "Photo index %lu not found", (unsigned long)s_current_photo_idx);
+    char filename[128];
+    if(storage_gallery_get_path(s_current_pos, path, sizeof(path)) == ESP_OK && storage_gallery_get_filename(s_current_pos, filename, sizeof(filename)) == ESP_OK){
+        ESP_LOGI(TAG, "Gallery viewing [%s] (%lu/%lu)", filename, (long)(s_current_pos+1), (unsigned long)total);
+        display_show_gallery_photo(path, filename, s_current_pos+1, total);
     }
 }
 
@@ -47,6 +49,7 @@ void gallery_display_current_photo(void)
 static void gallery_handle_open_camera(void)
 {
     ESP_LOGI(TAG, ">>> Switching back to CAMERA mode...");
+    s_current_pos = -1;
     mode_set(APP_MODE_CAMERA);
 }
 
@@ -54,52 +57,52 @@ static void gallery_handle_open_camera(void)
 static void gallery_handle_scroll_previous(void)
 {
     ESP_LOGI(TAG, "Gallery: Scroll UP (Next item in gallery)");
-    
-    if(s_current_photo_idx >= 1){
-        s_current_photo_idx --;
-        char path[128];
+    uint32_t total = storage_gallery_get_count();
+    if(total == 0) return;
 
-        // Bỏ qua các index file bị xóa hoặc không tồn tại
-        while(s_current_photo_idx >= 1 && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
-            s_current_photo_idx--;
-        }
-    } else {
-        // nếu bức ảnh hiện tại idx = 1 thì quay về bức ảnh mới nhất trong gallery
-        s_current_photo_idx = storage_get_current_index();
-        ESP_LOGI(TAG, "Already at the first photo, scroll back to lastest photo");
+    s_current_pos--;
+    if(s_current_pos < 0){
+        s_current_pos = total - 1;
     }
 
     gallery_display_current_photo();
-    ESP_LOGI(TAG, "CURRENT PHOTO INDEX = %lu", s_current_photo_idx);
 }
 
 static void gallery_handle_scroll_next(void)
 {
     ESP_LOGI(TAG, "Gallery: Scroll DOWN (Next item)");
 
-    uint32_t max_idx = storage_get_current_index();
-    if (s_current_photo_idx <= max_idx){
-        s_current_photo_idx ++;
-        // keep scroll next to look for a valid photo
-        char path[128];
-        while(s_current_photo_idx <= max_idx && storage_get_path_by_index(s_current_photo_idx, path, sizeof(path)) != ESP_OK){
-            s_current_photo_idx++;
-        }
-    } else {
-        s_current_photo_idx = 1;
-        ESP_LOGI(TAG, "Already at the latest photo, return back to the first one..");
+    uint32_t total = storage_gallery_get_count();
+    if(total == 0) return;
+
+    s_current_pos++;
+    if((uint32_t)s_current_pos >= total){
+        s_current_pos = 0;
     }
+
     gallery_display_current_photo();
-    ESP_LOGI(TAG, "CURRENT PHOTO INDEX = %lu", s_current_photo_idx);
 }
 
 static void gallery_handle_delete_photo(void){
-    if(s_current_photo_idx == 0) return;
-    ESP_LOGI(TAG, "Gallery: Deleting photo [%lu]...", (unsigned long)s_current_photo_idx);
-    esp_err_t ret = storage_delete_photo(s_current_photo_idx);
+    uint32_t total = storage_gallery_get_count();
+    if(total == 0 || s_current_pos < 0) return;
 
-    if(ret == ESP_OK) {
-        gallery_handle_scroll_previous();
+
+    ESP_LOGI(TAG, "Gallery: Deleting photo at position %ld..", (long)s_current_pos);
+    esp_err_t ret = storage_gallery_delete(s_current_pos);
+
+    if(ret == ESP_OK){
+        total = storage_gallery_get_count();
+        if(total == 0){
+            ESP_LOGI(TAG, "All photos deleted, returning to Camera mode");
+            mode_set(APP_MODE_CAMERA);
+            return;
+        }
+
+        if((uint32_t)s_current_pos >= total){
+            s_current_pos = total - 1;
+        }
+        gallery_display_current_photo();
         s_cached_rem_photos = storage_get_remaining_photos();
     } else {
         ESP_LOGE(TAG, "Failed to delete photo");

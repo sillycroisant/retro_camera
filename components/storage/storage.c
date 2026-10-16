@@ -15,6 +15,8 @@
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_heap_caps.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #define STORAGE_ROOT    "/sdcard"
 #define PHOTO_DIRECTORY "/sdcard/photos"
@@ -29,7 +31,33 @@
 #define SDMMC_PIN_CMD GPIO_NUM_38
 #define SDMMC_PIN_D0  GPIO_NUM_40
 
+#define GALLERY_INITIAL_CAPACITY    1000
+#define GALLERY_CAPACITY_STEP       1000 
+#define GALLERY_MAX_FILES 15000 // support maximum 15000 photos
+#define GALLERY_NAME_LEN    32
+
 static const char *TAG = "[Storage]";
+
+static char (*s_gallery_files)[GALLERY_NAME_LEN] = NULL;
+static uint32_t s_gallery_capacity = 0;
+static uint32_t s_gallery_file_count = 0;
+
+static bool ensure_gallery_capacity(uint32_t needed){
+    if(needed <= s_gallery_capacity) return true;
+    if(needed > GALLERY_MAX_FILES) return false;
+
+    uint32_t new_cap = s_gallery_capacity == 0 ? GALLERY_INITIAL_CAPACITY : s_gallery_capacity + GALLERY_CAPACITY_STEP;
+    if(new_cap < needed) new_cap = needed;
+
+    char (*new_buf)[GALLERY_NAME_LEN] = heap_caps_realloc(s_gallery_files, new_cap * GALLERY_NAME_LEN, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if(new_buf == NULL){
+        ESP_LOGE(TAG, "Cannot expand gallery file list to %lu items", (unsigned long)new_cap);
+        return false;
+    }
+    s_gallery_files = new_buf;
+    s_gallery_capacity = new_cap;
+    return true;
+}
 
 static sdmmc_card_t *card = NULL;
 
@@ -103,6 +131,100 @@ struct storage_video{
 //     ESP_LOGI(TAG, "Found %lu photos", (unsigned long)image_count);
 // }
 
+esp_err_t storage_gallery_refresh(void){
+    if(!ensure_gallery_capacity(GALLERY_INITIAL_CAPACITY)) return ESP_ERR_NO_MEM;
+
+    DIR *dir = opendir(PHOTO_DIRECTORY);
+    if(dir == NULL){
+        s_gallery_file_count = 0;
+        return ESP_FAIL;
+    }
+
+    struct dirent *entry;
+    uint32_t count = 0;
+
+    while((entry = readdir(dir)) != NULL){
+        char *ext = strrchr(entry->d_name, '.');
+        if(ext != NULL && (strcasecmp(ext, ".jpg") == 0)){
+            if(!ensure_gallery_capacity(count+1)){
+                ESP_LOGW(TAG, "Max gallery capacity reached (%lu files)", (unsigned long)count);
+                break;
+            }
+            strncpy(s_gallery_files[count], entry->d_name, GALLERY_NAME_LEN-1);
+            s_gallery_files[count][GALLERY_NAME_LEN-1] = '\0';
+            count++;
+
+            if(count % 500 == 0){
+                vTaskDelay(pdMS_TO_TICKS(1));
+            }
+        }
+    }
+    closedir(dir);
+
+    if(count > 1){
+        qsort(s_gallery_files, count, GALLERY_NAME_LEN, (int (*)(const void *, const void *))strcmp);
+    }
+
+    s_gallery_file_count = count;
+    image_count = count;
+    ESP_LOGI(TAG, "Loaded %lu files into PSRAM (Capacity: %lu)", (unsigned long)s_gallery_file_count, (unsigned long)s_gallery_capacity);
+    return ESP_OK;
+}
+
+esp_err_t storage_gallery_append_photo(const char *filename){
+    if(!ensure_gallery_capacity(s_gallery_file_count+1)){
+        return ESP_ERR_NO_MEM;
+    }
+    strncpy(s_gallery_files[s_gallery_file_count], filename, GALLERY_NAME_LEN-1);
+    s_gallery_files[s_gallery_file_count][GALLERY_NAME_LEN-1] = '\0';
+    s_gallery_file_count++;
+    image_count = s_gallery_file_count;
+    return ESP_OK;
+
+}
+
+esp_err_t storage_gallery_delete(uint32_t pos){
+    if(pos >= s_gallery_file_count || s_gallery_files == NULL){
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    char full_path[128];
+    snprintf(full_path, sizeof(full_path), "%s/%s", PHOTO_DIRECTORY, s_gallery_files[pos]);
+    if(remove(full_path)==0){
+        ESP_LOGI(TAG, "Deleted file: %s", full_path);
+        // if photo position after delete
+        if(pos < s_gallery_file_count - 1){
+            memmove(&s_gallery_files[pos], &s_gallery_files[pos+1], (s_gallery_file_count - 1 - pos) * GALLERY_NAME_LEN);
+        }
+        s_gallery_file_count--;
+        image_count = s_gallery_file_count;
+        return ESP_OK;
+    }
+    return ESP_FAIL;
+}
+
+// 1. Lấy tổng số lượng ảnh hiện có
+uint32_t storage_gallery_get_count(void) {
+    return s_gallery_file_count;
+}
+
+// 2. Lấy tên file theo vị trí (pos từ 0 đến count - 1)
+esp_err_t storage_gallery_get_filename(uint32_t pos, char *out_filename, size_t max_len) {
+    if (pos >= s_gallery_file_count || out_filename == NULL || s_gallery_files == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strncpy(out_filename, s_gallery_files[pos], max_len - 1);
+    out_filename[max_len - 1] = '\0';
+    return ESP_OK;
+}
+// 3. Lấy đường dẫn đầy đủ (/sdcard/photos/tên_file)
+esp_err_t storage_gallery_get_path(uint32_t pos, char *out_path, size_t max_len) {
+    char fname[GALLERY_NAME_LEN];
+    esp_err_t ret = storage_gallery_get_filename(pos, fname, sizeof(fname));
+    if (ret != ESP_OK) return ret;
+    snprintf(out_path, max_len, "%s/%s", PHOTO_DIRECTORY, fname);
+    return ESP_OK;
+}
 
 static bool storage_load_index(void)
 {
@@ -179,10 +301,7 @@ esp_err_t storage_rescan(void){
              (unsigned long)image_count, (unsigned long)current_index);
 
     storage_save_index();
-    return ESP_OK;
-
-
-    
+    return ESP_OK;    
 }
 
 esp_err_t storage_init(void){
@@ -270,14 +389,13 @@ esp_err_t storage_init(void){
         ESP_LOGI(TAG, "Latest photo found: %s", latest_path);
     }
 
+    storage_gallery_refresh();
+
     return ESP_OK;
 }
 
 
-esp_err_t storage_save_jpeg(
-    const uint8_t *jpeg,
-    size_t len
-) {
+esp_err_t storage_save_jpeg(const uint8_t *jpeg, size_t len) {
     snprintf(
         latest_filename,
         sizeof(latest_filename),
@@ -311,7 +429,8 @@ esp_err_t storage_save_jpeg(
     g_index.image_count = image_count;
 
     storage_save_index();
-    
+
+    storage_gallery_append_photo(latest_filename);
     return ESP_OK;
 }
 

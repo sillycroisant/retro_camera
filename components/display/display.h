@@ -27,7 +27,9 @@ void display_draw_osd_camera(uint16_t *buf, int buf_w, int buf_h, int img_w, int
                                 int battery_pct, bool sd_ok);
 
 void display_draw_osd_gallery(uint16_t *buf, int buf_w, int buf_h, int img_w, int img_h,
-                                uint32_t current_idx, uint32_t total_count);
+                                const char *filename, uint32_t current_pose_1based, uint32_t total_count);
+
+esp_err_t display_show_gallery_photo(const char *file_path, const char *filename, uint32_t current_pos_1based, uint32_t total_count);
 
 /**
  * @brief Khởi tạo màn hình LCD ST7789 qua SPI DMA và bật đèn nền
